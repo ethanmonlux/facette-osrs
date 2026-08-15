@@ -169,21 +169,53 @@ public class TelemetrySchemaFixtureTest
 			FacetteTelemetryPlugin.class.getName(), manifest.getProperty("plugins"));
 	}
 
+	/**
+	 * The distribution and affiliation copy has to stay true at every point in the Plugin Hub
+	 * lifecycle: before a submission exists, while one is under review, and after it is accepted.
+	 *
+	 * <p>The earlier wording could not. It pinned the pre-review state itself — "not currently
+	 * distributed through the RuneLite Plugin Hub", "no submission has been reviewed", "Nothing
+	 * here claims Plugin Hub approval" — so acceptance would have turned the README false without
+	 * anything changing in the repository, and the stale copy would have been carried into the
+	 * public projection. What is pinned now is the part that does not expire: the intended
+	 * installation route, the absence of prebuilt binaries here, and the independence disclaimer.
+	 *
+	 * <p>The removed phrases stay in this file as negative assertions. Documenting a state that
+	 * expires is the failure mode, so it is cheaper to keep the exact strings barred than to
+	 * rediscover why they were wrong the next time someone reaches for them.
+	 */
 	@Test
-	public void theReadmeDocumentsTheVersionedTargetAndClaimsNoApprovalOrEndorsement()
+	public void theReadmeDocumentsTheVersionedTargetAndTheEvergreenDistributionContract()
 		throws IOException
 	{
 		String readme = readmeProse();
 		assertTrue("the README must name the schema-2 target file",
 			readme.contains(TelemetrySnapshotWriter.TARGET_FILE_NAME));
-		assertTrue("the README must still disclaim affiliation",
-			readme.contains("not affiliated with or endorsed by Jagex or RuneLite"));
-		assertTrue("the README must still disclaim approval and endorsement outright",
+		assertTrue("the README must still disclaim affiliation, naming Jagex and the RuneLite"
+				+ " project as the independent parties they are",
+			readme.contains(
+				"not affiliated with or endorsed by Jagex Ltd. or the RuneLite project"));
+		assertTrue("the README must name the Plugin Hub as the intended installation route,"
+				+ " without claiming the submission has been accepted",
+			readme.contains(
+				"Facette Companion is intended to be installed through the RuneLite Plugin"
+					+ " Hub."));
+		assertTrue("the README must say this repository ships no prebuilt binary, which is what"
+				+ " keeps the contributor build from reading as an installation path",
+			readme.contains("This repository does not distribute prebuilt JAR files."));
+
+		assertFalse("the self-expiring no-approval-claimed line must not come back; it becomes"
+				+ " false the moment the Plugin Hub accepts the plugin",
+			readme.contains("Nothing here claims Plugin Hub approval"));
+		assertFalse("the self-expiring approval and endorsement disclaimer must not come back",
 			readme.contains(
 				"nothing here is approved or endorsed by Jagex, RuneLite, or the RuneLite"
 					+ " Plugin Hub"));
-		assertTrue("the README must say plainly that no Plugin Hub approval is claimed",
-			readme.contains("Nothing here claims Plugin Hub approval"));
+		assertFalse("the pre-submission distribution state must not come back",
+			readme.contains(
+				"This plugin is not currently distributed through the RuneLite Plugin Hub"));
+		assertFalse("the pre-review submission state must not come back",
+			readme.contains("no submission has been reviewed"));
 	}
 
 	/**
