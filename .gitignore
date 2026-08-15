@@ -1,0 +1,15 @@
+.gradle
+build
+out/
+.idea/
+.project
+.settings/
+.classpath
+nbactions.xml
+nb-configuration.xml
+nbproject/
+
+# Generated plugin artifacts are never committed. The Gradle wrapper jar below
+# is part of the official RuneLite template and is intentionally tracked.
+*.jar
+!gradle/wrapper/gradle-wrapper.jar
