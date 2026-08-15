@@ -1,0 +1,29 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+# Read-only. This workflow publishes nothing and uses no repository secrets.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Gradle build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '11'
+
+      - name: Build and test
+        run: ./gradlew --no-daemon clean build
