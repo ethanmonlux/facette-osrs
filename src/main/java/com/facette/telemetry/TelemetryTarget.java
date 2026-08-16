@@ -27,27 +27,20 @@ package com.facette.telemetry;
 import java.util.Objects;
 
 /**
- * The NPC the local player is interacting with, reduced to what any observer of the game world
- * can already see.
+ * The NPC the local player is interacting with, reduced to what any observer of the game world can
+ * already see. Only an NPC can be represented, which is why {@link #KIND} is a constant rather than
+ * a discriminator: a player target has no representation here to reach even by mistake.
  *
- * <p>Only an NPC can be represented, which is why {@link #KIND} is a constant rather than a
- * discriminator: a player target has no representation here to be reached even by mistake, and no
- * other player's name or identity passes through this type.
- *
- * <p>Health is the ratio and scale the server actually transmits and nothing more; no real
- * hitpoints figure is estimated or reconstructed. The two are populated together or not at all,
- * because a ratio without its scale means nothing.
- *
- * <p>Holds no RuneLite types, so every rule here is exercisable without a game client.
+ * Health is the ratio and scale the server transmits, never a real hitpoints figure, and the two
+ * are populated together or not at all because a ratio without its scale means nothing.
  */
 final class TelemetryTarget
 {
-	/** The only permitted target kind. */
 	static final String KIND = "npc";
 
 	/**
-	 * The name the game cache reports for an actor it has no name for. Treated as no name rather
-	 * than exported as the four characters {@code null} inside a JSON string.
+	 * The name the game cache reports for an actor it has no name for. Treated as no name rather than
+	 * exported as the four characters {@code null} inside a JSON string.
 	 */
 	private static final String ABSENT_NAME = "null";
 
@@ -70,16 +63,9 @@ final class TelemetryTarget
 	}
 
 	/**
-	 * The interacted-with NPC as read from the client.
-	 *
-	 * @param id          the NPC identity; a negative value describes no NPC
-	 * @param name        the NPC's current display name, or null when it has none
-	 * @param combatLevel the NPC's combat level; a non-positive level means it has none
-	 * @param healthRatio the transmitted health in {@code healthScale} units, or negative when the
-	 *                    server sends none for this actor
-	 * @param healthScale the maximum {@code healthRatio} can take, or non-positive when none
-	 * @param dead        the observable dead state of the actor
-	 * @return the target, or null when the reading does not describe an NPC at all
+	 * The interacted-with NPC. A negative identity is the client's signal that this is no NPC at all
+	 * and is the only reading that yields null. A non-positive combat level still describes a real
+	 * NPC, one that simply has no level, and is exported as null.
 	 */
 	static TelemetryTarget npc(int id, String name, int combatLevel, int healthRatio,
 		int healthScale, boolean dead)
@@ -89,8 +75,7 @@ final class TelemetryTarget
 			return null;
 		}
 		// Both or neither: a non-positive scale is no scale, a negative ratio is the client's own
-		// "not transmitted" signal, and a ratio above its scale is not a proportion. Each yields no
-		// health at all rather than half a reading.
+		// "not transmitted" signal, and a ratio above its scale is not a proportion.
 		boolean healthReported = healthScale > 0 && healthRatio >= 0 && healthRatio <= healthScale;
 		return new TelemetryTarget(
 			id,
@@ -131,11 +116,7 @@ final class TelemetryTarget
 		return dead;
 	}
 
-	/**
-	 * Trims the client's name and reduces a blank or absent one to null. The name is presentation
-	 * metadata only: identity is {@link #id}, and nothing decides control flow from this string.
-	 * Length bounding is left to serialization.
-	 */
+	/** Presentation metadata only: identity is the numeric id. Bounding is left to serialization. */
 	private static String normalizeName(String raw)
 	{
 		if (raw == null)

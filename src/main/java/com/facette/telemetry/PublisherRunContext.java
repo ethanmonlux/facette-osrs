@@ -33,26 +33,17 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * One plugin run, and the lifecycle authority for everything that run owns: its telemetry state,
- * its writer, its publisher thread, and its generation.
+ * One plugin run, and the lifecycle authority for what that run owns: its telemetry state, its
+ * writer, its publisher thread, and its generation.
  *
- * <p>RuneLite reuses a plugin instance across disable and enable, and startup work is deferred
- * onto the client thread, so a disabled run can still have a callback pending or a publication in
- * flight while the next run starts. Binding all of that to one object per start gives three
- * guarantees that do not depend on timing:
- *
- * <ul>
- *   <li><b>Retirement is per-run and permanent.</b> {@link #retire()} affects only this context;
- *       a later start creates a different object and cannot revive it.</li>
- *   <li><b>State, writer, and executor are reachable only through the run that owns them,</b> so
- *       work bound to a retired context cannot consume a later run's sequence, clear its dirty
- *       flag, or write through its writer.</li>
- *   <li><b>Generation decides who may replace the target file.</b> Runs share a monotonic
- *       counter; a run may commit only while it is still the newest one started — see
- *       {@link #isCommitAuthorized()}.</li>
- * </ul>
- *
- * <p>Holds no RuneLite types, so every lifecycle rule here is exercisable without a game client.
+ * RuneLite reuses a plugin instance across disable and enable, and startup work is deferred onto
+ * the client thread, so a disabled run can still have a callback pending or a publication in flight
+ * while the next run starts. Binding all of it to one object per start gives three guarantees that
+ * do not depend on timing. Retirement is per-run and permanent, since a later start creates a
+ * different object. State, writer, and executor are reachable only through the run that owns them,
+ * so work bound to a retired run cannot touch a later run's sequence or writer. And generation
+ * decides who may replace the target file: runs share a monotonic counter, and a run may commit
+ * only while it is still the newest one started. See {@link #isCommitAuthorized()}.
  */
 final class PublisherRunContext
 {
@@ -68,9 +59,8 @@ final class PublisherRunContext
 	private final AtomicBoolean current = new AtomicBoolean(true);
 
 	/**
-	 * Set once client-thread initialization has sampled state and seeded baselines. Until then
-	 * nothing may publish and events are ignored, so no snapshot is built from a partly
-	 * initialized run.
+	 * Set once client-thread initialization has sampled state and seeded baselines. Until then nothing
+	 * may publish, so no snapshot is built from a partly initialized run.
 	 */
 	private final AtomicBoolean initialized = new AtomicBoolean(false);
 
@@ -88,8 +78,7 @@ final class PublisherRunContext
 
 	/**
 	 * Begins a run, claiming the next generation. Claiming it at start rather than at first
-	 * publication is what makes an older run stop being allowed to commit the moment a newer one
-	 * exists.
+	 * publication is what stops an older run committing the moment a newer one exists.
 	 */
 	static PublisherRunContext begin(AtomicLong newestGeneration, TelemetryState state,
 		TelemetrySnapshotWriter writer)
@@ -112,20 +101,15 @@ final class PublisherRunContext
 	}
 
 	/**
-	 * Whether work bound to this run may still act. Checked when a deferred startup callback
-	 * finally runs, when it goes to attach a publisher, and at the top of each periodic tick.
-	 * What protects the target file is {@link #isCommitAuthorized()}.
+	 * Whether work bound to this run may still act. What protects the target file is
+	 * {@link #isCommitAuthorized()}, not this.
 	 */
 	boolean isCurrent()
 	{
 		return current.get();
 	}
 
-	/**
-	 * Retires this run. Idempotent, one-way, and scoped to this context alone.
-	 *
-	 * @return true if this call retired the run, false if it was already retired
-	 */
+	/** Idempotent, one-way, and scoped to this context alone. Returns false if already retired. */
 	synchronized boolean retire()
 	{
 		return current.compareAndSet(true, false);
@@ -143,13 +127,10 @@ final class PublisherRunContext
 	}
 
 	/**
-	 * Whether this run may still replace the target file.
-	 *
-	 * <p>Deliberately independent of {@link #isCurrent()}: a retired run is still allowed to commit
-	 * its own final inactive snapshot, which is the point of shutdown. What it may not do is commit
-	 * once a newer run has started, because that run is now the authority on what the file should
-	 * say. Checked immediately before replacement rather than when the write begins, so a write
-	 * that stages slowly and finishes after a re-enable is refused rather than landing stale.
+	 * Whether this run may still replace the target file. Deliberately independent of
+	 * {@link #isCurrent()}: a retired run may still commit its own final inactive snapshot, but not
+	 * once a newer run has started. Checked immediately before replacement, so a write that staged
+	 * slowly and finished after a re-enable is refused rather than landing stale.
 	 */
 	boolean isCommitAuthorized()
 	{
@@ -157,19 +138,10 @@ final class PublisherRunContext
 	}
 
 	/**
-	 * Adopts the publisher thread, before anything is scheduled on it.
-	 *
-	 * <p>Adoption is deliberately earlier than scheduling the periodic task, which runs with a
-	 * zero initial delay and can therefore execute before the scheduling call returns. If the run
-	 * only counted as having a publisher after that, a disable landing in the gap would find
-	 * nothing to stop, leak the executor, and skip the final snapshot.
-	 *
-	 * <p>Refuses once retired, atomically with {@link #retire()} — both are synchronized on this
-	 * context — so either retirement wins and the caller disposes of the executor, or this wins
-	 * and shutdown is guaranteed to find it.
-	 *
-	 * @return false if the run was already retired, in which case it did not adopt the executor
-	 *         and the caller must shut it down
+	 * Adopts the publisher thread before anything is scheduled on it, because the periodic task has a
+	 * zero initial delay and can run before the scheduling call returns. Refuses once retired,
+	 * atomically with {@link #retire()}, so either retirement wins and the caller shuts the executor
+	 * down, or this wins and shutdown is guaranteed to find it.
 	 */
 	synchronized boolean attachPublisherIfCurrent(ExecutorService executor)
 	{
@@ -181,32 +153,22 @@ final class PublisherRunContext
 		return true;
 	}
 
-	/**
-	 * Adopts the periodic task once it has been scheduled. Harmless if shutdown already claimed
-	 * the executor — the task is cancelled below either way.
-	 */
+	/** Harmless if shutdown already claimed the executor, since the task is cancelled either way. */
 	synchronized void attachPublishTask(Future<?> publishTask)
 	{
 		this.publishTask = publishTask;
 	}
 
-	/** Whether a publisher was ever started for this run. */
 	synchronized boolean hasPublisher()
 	{
 		return executor != null;
 	}
 
 	/**
-	 * Stops periodic publication and hands the publisher its last task.
-	 *
-	 * <p>Non-blocking. The final write is queued on the run's own single publisher thread, so a
-	 * stalled filesystem cannot block whoever is disabling the plugin — on the real client,
-	 * RuneLite's client thread. Because that thread is single, the final write also queues behind
-	 * any publication already in flight instead of racing it.
-	 *
-	 * @return false when this run never had a publisher, or the executor had already stopped
-	 *         accepting work, in which case nothing was submitted and there is no final snapshot
-	 *         to wait for
+	 * Stops periodic publication and queues the final write on the run's own publisher thread, without
+	 * blocking. A stalled filesystem therefore cannot block whoever is disabling the plugin, and the
+	 * final write queues behind any publication already in flight instead of racing it. Returns false
+	 * when there was no publisher or the executor had already stopped accepting work.
 	 */
 	synchronized boolean submitFinalWrite(Runnable finalWrite)
 	{
@@ -235,11 +197,9 @@ final class PublisherRunContext
 	}
 
 	/**
-	 * Waits a bounded time for the publisher to finish, including its final write.
-	 *
-	 * @return true if it finished within the bound; false means the write is still running and the
-	 *         caller must return anyway, leaving it to commit only if {@link #isCommitAuthorized()}
-	 *         still holds when it reaches the target
+	 * Waits a bounded time for the publisher to finish, including its final write. False means the
+	 * write is still running, and it will commit only if {@link #isCommitAuthorized()} still holds
+	 * when it reaches the target.
 	 */
 	boolean awaitPublisherTermination(long timeout, TimeUnit unit)
 	{
@@ -265,10 +225,7 @@ final class PublisherRunContext
 		}
 	}
 
-	/**
-	 * Stops the publisher without submitting a final write, for a run being abandoned — a startup
-	 * that failed, or one disabled before it ever published. Idempotent.
-	 */
+	/** Stops the publisher without a final write, for a run being abandoned. Idempotent. */
 	synchronized void abandonPublisher()
 	{
 		if (publishTask != null)

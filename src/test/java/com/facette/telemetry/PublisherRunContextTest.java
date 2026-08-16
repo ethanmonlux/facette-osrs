@@ -46,14 +46,10 @@ import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 
 /**
- * Covers the run-generation rule that keeps a disabled plugin run's scheduled work out of the
- * next run: a task bound to a retired run must not publish, must not reach the newer run's
- * state or writer, and must not be revivable by the next start.
- *
- * <p>The interleaving is driven by latches and by the lock's own queue state, never by
- * sleeping — the assertions depend on observed state, not on elapsed time.
- *
- * <p>Needs no account, credential, network service, Facette installation, or game session.
+ * Covers the run-generation rule that keeps a disabled run's scheduled work out of the next run: a
+ * task bound to a retired run must not publish, must not reach the newer run's state or writer, and
+ * must not be revivable. The interleaving is driven by latches and by the lock's own queue state,
+ * never by sleeping.
  */
 public class PublisherRunContextTest
 {
@@ -88,7 +84,7 @@ public class PublisherRunContextTest
 			new TelemetrySnapshotWriter(directory));
 	}
 
-	/** Mirrors the plugin's publication: build, write, record — all through one run. */
+	/** Mirrors the plugin's publication: build, write, and record, all through one run. */
 	private static void publish(PublisherRunContext run, boolean pluginActive) throws IOException
 	{
 		TelemetrySnapshot snapshot = run.getState().nextSnapshot(pluginActive);
@@ -205,8 +201,8 @@ public class PublisherRunContextTest
 	}
 
 	/**
-	 * The same interleaving, but confirming the new run still works normally afterwards — a
-	 * guard that could suppress old work by suppressing all work would pass the test above.
+	 * The same interleaving, but confirming the new run still works normally afterwards. A guard
+	 * that suppressed all work rather than only old work would pass the test above.
 	 */
 	@Test
 	public void theNewRunPublishesNormallyAndStartsAtSequenceZero() throws Exception
@@ -443,7 +439,7 @@ public class PublisherRunContextTest
 			return t;
 		});
 
-		// Adoption happens first, with no task yet — exactly the window the ordering closes.
+		// Adoption happens first, with no task yet: exactly the window the ordering closes.
 		run.attachPublisherIfCurrent(executor);
 		assertTrue("shutdown must be able to find the executor immediately", run.hasPublisher());
 
@@ -471,8 +467,8 @@ public class PublisherRunContextTest
 		CountDownLatch runAInsideTheLock = new CountDownLatch(1);
 		CountDownLatch runAMayFinish = new CountDownLatch(1);
 
-		// Run A's final write, holding the lock across staging, authorization, and the move —
-		// the discipline the plugin's publish() now enforces for every publication path.
+		// Run A's final write, holding the lock across staging, authorization, and the move, which
+		// is the discipline the plugin's publish() now enforces for every publication path.
 		Thread runAFinalWrite = new Thread(() ->
 		{
 			try
@@ -522,8 +518,8 @@ public class PublisherRunContextTest
 		}, "run-b-publish");
 		runBPublish.start();
 
-		// Run B must NOT be blocked by Run A's parked staging — that is the liveness property
-		// this narrower lock buys. It publishes while Run A is still stuck.
+		// Run B must NOT be blocked by Run A's parked staging. That is the liveness property this
+		// narrower lock buys: it publishes while Run A is still stuck.
 		runBPublish.join(TimeUnit.SECONDS.toMillis(TIMEOUT_SECONDS));
 		assertTrue("a newer run must publish even while an older one is stalled staging",
 			runBPublished.get());
@@ -545,8 +541,8 @@ public class PublisherRunContextTest
 	/**
 	 * Startup samples and seeds before it attaches a publisher, which is long enough for a
 	 * disable to land in between. Shutdown will already have decided there was no publisher to
-	 * stop, so adopting the executor at that point would leak it — no later shutdown can reach
-	 * it once a re-enable replaces the current run.
+	 * stop, so adopting the executor at that point would leak it: no later shutdown can reach it
+	 * once a re-enable replaces the current run.
 	 */
 	@Test
 	public void aRetiredRunRefusesToAdoptAPublisher()
@@ -608,7 +604,7 @@ public class PublisherRunContextTest
 
 	/**
 	 * Waits until the other thread is actually queued on the lock. This is a state check with
-	 * a bounded deadline, not a timing assumption — the test's correctness comes from
+	 * a bounded deadline, not a timing assumption. Correctness comes from
 	 * {@code hasQueuedThreads()} being true, and the deadline only converts a hang into a
 	 * failure.
 	 */

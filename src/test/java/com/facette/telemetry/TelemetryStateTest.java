@@ -42,8 +42,6 @@ import org.junit.Test;
  * equipment slots and twenty-eight inventory slots, active prayers, the NPC target, experience
  * seeding versus a real gain, session-local accumulated experience, session reset, identity and
  * sequence behavior, and the shutdown snapshot.
- *
- * <p>Needs no account, credential, network service, Facette installation, or game session.
  */
 public class TelemetryStateTest
 {
@@ -114,11 +112,9 @@ public class TelemetryStateTest
 	}
 
 	/**
-	 * A complete live sample, exactly as the plugin performs on each logged-in tick: the session
-	 * transition, then every player-derived reading, then the completeness mark.
-	 *
-	 * <p>Tests that care about one reading override it afterwards. Tests about the completeness
-	 * gate itself use {@link #enterLoggedIn()} instead.
+	 * A complete live sample, exactly as the plugin performs on each logged-in tick. Tests that care
+	 * about one reading override it afterwards; tests about the completeness gate itself use
+	 * {@link #enterLoggedIn()}.
 	 */
 	private void logIn()
 	{
@@ -175,10 +171,8 @@ public class TelemetryStateTest
 	}
 
 	/**
-	 * Reads a scalar value out of the document by key.
-	 *
-	 * <p>Takes the first occurrence, which is the top-level one for every key this class asks
-	 * about: the session and vitals objects come before the per-slot and per-skill entries that
+	 * Takes the first occurrence, which is the top-level one for every key this class asks about,
+	 * because the session and vitals objects come before the per-slot and per-skill entries that
 	 * reuse some of those names. Exact whole-document equality is pinned in
 	 * {@link TelemetrySnapshotTest} instead.
 	 */
@@ -1216,7 +1210,7 @@ public class TelemetryStateTest
 		assertTrue(state.seedXpBaseline("THIEVING", THIEVING, 1_150));
 
 		String json = snapshot();
-		assertEquals("the last single gain, 1150 - 1092 — not the whole span", "58",
+		assertEquals("the last single gain, 1150 - 1092, not the whole span", "58",
 			value(json, "lastDelta"));
 		assertEquals("the third event's time, not the first and not the seed", "1770000003000",
 			value(json, "lastChangedAt"));
@@ -1327,7 +1321,6 @@ public class TelemetryStateTest
 		assertEquals("40", value(snapshot(), "lastDelta"));
 	}
 
-	/** A measurable retained span marks the state dirty once, not once per retained event. */
 	@Test
 	public void measurableRetainedExperienceMarksTheStateDirtyExactlyOnce()
 	{
@@ -1460,7 +1453,7 @@ public class TelemetryStateTest
 
 	/**
 	 * The opposite arrival order, which the non-advancing rule alone does not cover: the
-	 * transient zero comes <em>first</em>, so it would anchor the span at zero and the real total
+	 * transient zero comes first, so it would anchor the span at zero and the real total
 	 * would then read as a gain the size of the whole skill.
 	 */
 	@Test
@@ -1567,7 +1560,7 @@ public class TelemetryStateTest
 
 	/**
 	 * Recency is decided by arrival order, not by the exported wall-clock timestamp: a backward
-	 * clock adjustment between two events would give the <em>older</em> one the larger value.
+	 * clock adjustment between two events would give the older one the larger value.
 	 */
 	@Test
 	public void aBackwardWallClockJumpBetweenRetainedEventsDoesNotReorderThem()
@@ -1592,7 +1585,6 @@ public class TelemetryStateTest
 			value(json, "lastChangedAt"));
 	}
 
-	/** A retained event is from the startup window, so it must not displace a newer live gain. */
 	@Test
 	public void aRetainedEventCannotDisplaceANewerLiveObservation()
 	{
@@ -2026,7 +2018,6 @@ public class TelemetryStateTest
 			state.isPublicationDue(1_500L));
 	}
 
-	/** Exported timestamps must keep following wall time, not the cadence source. */
 	@Test
 	public void exportedTimestampsFollowWallTimeWhileCadenceFollowsElapsedTime()
 	{

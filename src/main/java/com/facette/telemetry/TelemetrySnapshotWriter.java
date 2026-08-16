@@ -41,29 +41,20 @@ import java.util.function.BooleanSupplier;
 import java.util.function.LongSupplier;
 
 /**
- * Writes a snapshot to its local target file as one complete, atomic replacement.
- *
- * <p>The target is never streamed into and never partially overwritten. Each publication is
- * serialized into a temporary sibling in the same directory, forced to disk, closed, and only
- * then moved over the target — atomically where the filesystem supports it, otherwise by a plain
- * replacing move of the already-complete sibling. A reader that opens the target therefore sees
- * either the previous snapshot or the new one, never a partial document.
- *
- * <p>Holds no RuneLite types, so replacement, refusal, and cleanup are exercisable without a game
- * client.
+ * Writes a snapshot to its local target file as one complete replacement. The target is never
+ * streamed into and never partially overwritten: each publication is serialized into a temporary
+ * sibling, forced to disk, closed, and only then moved over the target, atomically where the
+ * filesystem supports it. A reader that opens the target sees either the previous snapshot or the
+ * new one, never a partial document.
  */
 final class TelemetrySnapshotWriter
 {
-	/** Hard ceiling on the serialized target, in UTF-8 bytes. */
 	static final int MAX_SNAPSHOT_BYTES = 16_384;
 
 	/**
-	 * Name of the exported file inside the plugin's data directory.
-	 *
-	 * <p>Versioned in the name, so schema 2 lands beside any schema-1 file a previous build left
-	 * rather than on top of it. This writer names one target and sweeps only temporary files
-	 * matching its own versioned prefix, so a {@code state-v1.json} in the same directory is never
-	 * opened, read, migrated, deleted, or even enumerated.
+	 * Versioned in the name, so schema 2 lands beside any schema-1 file rather than on top of it. This
+	 * writer names one target and sweeps only its own versioned temporary prefix, so a
+	 * {@code state-v1.json} in the same directory is never opened, read, migrated, or deleted.
 	 */
 	static final String TARGET_FILE_NAME = "state-v2.json";
 
@@ -71,16 +62,14 @@ final class TelemetrySnapshotWriter
 	private static final String TEMP_SUFFIX = ".tmp";
 
 	/**
-	 * Age at which an abandoned temporary file is considered safe to remove. Kept well above the
-	 * publish interval so a concurrently running client's in-flight file is never deleted out from
-	 * under it.
+	 * Kept well above the publish interval so a concurrently running client's in-flight file is never
+	 * deleted out from under it.
 	 */
 	private static final long STALE_TEMP_AGE_MILLIS = 60_000L;
 
 	/**
-	 * The move that puts the completed temporary file in place. Injectable so the atomic path and
-	 * the non-atomic fallback can both be exercised, since no portable filesystem refuses
-	 * {@code ATOMIC_MOVE} on demand.
+	 * Injectable so the atomic path and the non-atomic fallback can both be exercised, since no
+	 * portable filesystem refuses {@code ATOMIC_MOVE} on demand.
 	 */
 	@FunctionalInterface
 	interface Mover
@@ -88,7 +77,6 @@ final class TelemetrySnapshotWriter
 		void move(Path source, Path target, CopyOption... options) throws IOException;
 	}
 
-	/** Thrown when a serialized snapshot exceeds {@link #MAX_SNAPSHOT_BYTES}. */
 	static final class SnapshotTooLargeException extends IOException
 	{
 		private static final long serialVersionUID = 1L;
@@ -100,13 +88,9 @@ final class TelemetrySnapshotWriter
 	}
 
 	/**
-	 * Thrown when a fully staged snapshot is abandoned because the publication lost the right to
-	 * replace the target before it got there — in practice, a newer plugin run started while this
-	 * one was still writing.
-	 *
-	 * <p>An {@link IOException} on purpose: every caller already treats a failed write as "did not
-	 * reach the file", so the sequence, dirty flag, and heartbeat bookkeeping are left untouched
-	 * without a caller needing to know this case exists.
+	 * Thrown when a fully staged snapshot is abandoned because a newer plugin run started while this
+	 * one was writing. An {@link IOException} on purpose: every caller already treats a failed write
+	 * as "did not reach the file", so the sequence and heartbeat bookkeeping are left untouched.
 	 */
 	static final class CommitNotAuthorizedException extends IOException
 	{
@@ -144,25 +128,14 @@ final class TelemetrySnapshotWriter
 	}
 
 	/**
-	 * Publishes one snapshot, replacing the target with a complete document.
+	 * Publishes one snapshot, replacing the target with a complete document, and returns the number of
+	 * UTF-8 bytes written. Everything slow happens first and touches only the temporary file; only
+	 * then is {@code commitAuthorized} consulted and the target replaced, so a publication that staged
+	 * slowly discovers a newer run has taken over before it does any damage. When it is false the
+	 * staged file is deleted and the target left alone.
 	 *
-	 * <p>Staging and committing are separate. Everything slow — creating the directory, creating
-	 * the temporary sibling, writing it, forcing it to disk, closing it — happens first and touches
-	 * only the temporary file. Only then is {@code commitAuthorized} consulted, and only then is
-	 * the target replaced. Checking at the last possible moment is what lets a publication that
-	 * staged slowly discover, before it does any damage, that a newer run has taken over.
-	 *
-	 * @param commitLock       held across the authorization check and the replacement only, never
-	 *                         across staging. Serializing the commit stops a retired run's final
-	 *                         write from being authorized and then having a newer run publish
-	 *                         before its move lands; keeping staging out of it stops a stalled
-	 *                         write from blocking a newly enabled run from publishing at all
-	 * @param commitAuthorized evaluated under {@code commitLock}, immediately before replacement.
-	 *                         When false the staged file is deleted and the target left as it was
-	 * @return the number of UTF-8 bytes written
-	 * @throws SnapshotTooLargeException    if the snapshot exceeds the size ceiling, in which case
-	 *                                      nothing is staged at all
-	 * @throws CommitNotAuthorizedException if authorization was lost before replacement
+	 * {@code commitLock} is held across the authorization check and the replacement only, never across
+	 * staging, so a stalled write cannot block a newly enabled run from publishing.
 	 */
 	int write(TelemetrySnapshot snapshot, Lock commitLock, BooleanSupplier commitAuthorized)
 		throws IOException
@@ -195,8 +168,8 @@ final class TelemetrySnapshotWriter
 			commitLock.lock();
 			try
 			{
-				// The last moment at which abandoning costs nothing, and — because the lock is held
-				// from here through the move — the answer cannot go stale before the replacement.
+				// The last moment at which abandoning costs nothing. The lock is held from here
+				// through the move, so the answer cannot go stale before the replacement.
 				if (!commitAuthorized.getAsBoolean())
 				{
 					throw new CommitNotAuthorizedException(target);
@@ -244,12 +217,9 @@ final class TelemetrySnapshotWriter
 	}
 
 	/**
-	 * Removes temporary files this writer owns that a previous run abandoned — which only happens
-	 * when a client was killed mid-write, since {@link #write} deletes its own.
-	 *
-	 * <p>Only files matching this writer's own naming are considered, and only once older than
-	 * {@link #STALE_TEMP_AGE_MILLIS}, so a second client publishing at the same time never has its
-	 * in-flight file removed.
+	 * Removes temporary files this writer owns that a previous run abandoned, which only happens when
+	 * a client was killed mid-write. Only this writer's own naming is considered, and only once older
+	 * than {@link #STALE_TEMP_AGE_MILLIS}, so a second client's in-flight file is never removed.
 	 */
 	void sweepStaleTemporaryFiles() throws IOException
 	{
