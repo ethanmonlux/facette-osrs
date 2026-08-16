@@ -90,8 +90,8 @@ import net.runelite.client.plugins.PluginDescriptor;
 @Slf4j
 @PluginDescriptor(
 	name = "Facette Companion",
-	description = "Provides your own live game state to the separately installed Facette app "
-		+ "through one local file. Read-only; no network requests.",
+	description = "Exports your live game state to one documented local JSON file. "
+		+ "Facette is an optional reader. Read-only; no network requests.",
 	tags = {"facette", "companion", "second screen", "local file", "telemetry"}
 )
 public class FacetteTelemetryPlugin extends Plugin
