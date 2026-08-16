@@ -28,20 +28,16 @@ import java.util.Objects;
 
 /**
  * The NPC the local player is interacting with, reduced to what any observer of the game world can
- * already see. Only an NPC can be represented, which is why {@link #KIND} is a constant rather than
- * a discriminator: a player target has no representation here to reach even by mistake.
- *
- * Health is the ratio and scale the server transmits, never a real hitpoints figure, and the two
- * are populated together or not at all because a ratio without its scale means nothing.
+ * already see. Only an NPC can be represented, which is why the kind is a constant rather than a
+ * discriminator: a player target has no representation here to reach even by mistake. Health is the
+ * ratio and scale the server transmits, never a real hitpoints figure.
  */
 final class TelemetryTarget
 {
 	static final String KIND = "npc";
 
-	/**
-	 * The name the game cache reports for an actor it has no name for. Treated as no name rather than
-	 * exported as the four characters {@code null} inside a JSON string.
-	 */
+	// The name the game cache reports for an actor it has no name for. Treated as no name rather
+	// than exported as the four characters null.
 	private static final String ABSENT_NAME = "null";
 
 	private final int id;
@@ -63,9 +59,8 @@ final class TelemetryTarget
 	}
 
 	/**
-	 * The interacted-with NPC. A negative identity is the client's signal that this is no NPC at all
-	 * and is the only reading that yields null. A non-positive combat level still describes a real
-	 * NPC, one that simply has no level, and is exported as null.
+	 * The interacted-with NPC. A negative identity is the client's signal that this is no NPC at all.
+	 * A non-positive combat level still describes a real NPC, one that simply has no level.
 	 */
 	static TelemetryTarget npc(int id, String name, int combatLevel, int healthRatio,
 		int healthScale, boolean dead)
@@ -74,8 +69,8 @@ final class TelemetryTarget
 		{
 			return null;
 		}
-		// Both or neither: a non-positive scale is no scale, a negative ratio is the client's own
-		// "not transmitted" signal, and a ratio above its scale is not a proportion.
+		// Both or neither, because a ratio without its scale means nothing: a non-positive scale is
+		// no scale, and a negative ratio is the client's own "not transmitted" signal.
 		boolean healthReported = healthScale > 0 && healthRatio >= 0 && healthRatio <= healthScale;
 		return new TelemetryTarget(
 			id,
@@ -116,7 +111,6 @@ final class TelemetryTarget
 		return dead;
 	}
 
-	/** Presentation metadata only: identity is the numeric id. Bounding is left to serialization. */
 	private static String normalizeName(String raw)
 	{
 		if (raw == null)

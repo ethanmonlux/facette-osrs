@@ -41,36 +41,25 @@ import java.util.function.BooleanSupplier;
 import java.util.function.LongSupplier;
 
 /**
- * Writes a snapshot to its local target file as one complete replacement. The target is never
- * streamed into and never partially overwritten: each publication is serialized into a temporary
- * sibling, forced to disk, closed, and only then moved over the target, atomically where the
- * filesystem supports it. A reader that opens the target sees either the previous snapshot or the
- * new one, never a partial document.
+ * Writes a snapshot to its local target file as one complete replacement. Each publication is
+ * serialized into a temporary sibling, forced to disk, closed, and only then moved over the target,
+ * atomically where the filesystem supports it. A reader sees either the previous snapshot or the new
+ * one, never a partial document.
  */
 final class TelemetrySnapshotWriter
 {
 	static final int MAX_SNAPSHOT_BYTES = 16_384;
 
-	/**
-	 * Versioned in the name, so schema 2 lands beside any schema-1 file rather than on top of it. This
-	 * writer names one target and sweeps only its own versioned temporary prefix, so a
-	 * {@code state-v1.json} in the same directory is never opened, read, migrated, or deleted.
-	 */
+	// Versioned, so schema 2 lands beside any schema-1 file rather than on top of it. This writer
+	// sweeps only its own prefix, so a state-v1.json alongside it is never touched.
 	static final String TARGET_FILE_NAME = "state-v2.json";
 
 	private static final String TEMP_PREFIX = "state-v2-";
 	private static final String TEMP_SUFFIX = ".tmp";
 
-	/**
-	 * Kept well above the publish interval so a concurrently running client's in-flight file is never
-	 * deleted out from under it.
-	 */
+	// Well above the publish interval, so a second client's in-flight file is never deleted.
 	private static final long STALE_TEMP_AGE_MILLIS = 60_000L;
 
-	/**
-	 * Injectable so the atomic path and the non-atomic fallback can both be exercised, since no
-	 * portable filesystem refuses {@code ATOMIC_MOVE} on demand.
-	 */
 	@FunctionalInterface
 	interface Mover
 	{
@@ -88,9 +77,9 @@ final class TelemetrySnapshotWriter
 	}
 
 	/**
-	 * Thrown when a fully staged snapshot is abandoned because a newer plugin run started while this
-	 * one was writing. An {@link IOException} on purpose: every caller already treats a failed write
-	 * as "did not reach the file", so the sequence and heartbeat bookkeeping are left untouched.
+	 * Thrown when a staged snapshot is abandoned because a newer plugin run started while this one was
+	 * writing. An IOException on purpose: every caller already treats a failed write as "did not reach
+	 * the file", so the sequence and heartbeat bookkeeping are left untouched.
 	 */
 	static final class CommitNotAuthorizedException extends IOException
 	{
@@ -128,14 +117,10 @@ final class TelemetrySnapshotWriter
 	}
 
 	/**
-	 * Publishes one snapshot, replacing the target with a complete document, and returns the number of
-	 * UTF-8 bytes written. Everything slow happens first and touches only the temporary file; only
-	 * then is {@code commitAuthorized} consulted and the target replaced, so a publication that staged
-	 * slowly discovers a newer run has taken over before it does any damage. When it is false the
-	 * staged file is deleted and the target left alone.
-	 *
-	 * {@code commitLock} is held across the authorization check and the replacement only, never across
-	 * staging, so a stalled write cannot block a newly enabled run from publishing.
+	 * Publishes one snapshot and returns the number of UTF-8 bytes written. Everything slow touches
+	 * only the temporary file. Commit authority is checked after that and the target replaced, so a
+	 * slow publication finds out a newer run took over before it does damage. The lock covers that
+	 * check and the replacement only, never staging.
 	 */
 	int write(TelemetrySnapshot snapshot, Lock commitLock, BooleanSupplier commitAuthorized)
 		throws IOException
@@ -168,8 +153,6 @@ final class TelemetrySnapshotWriter
 			commitLock.lock();
 			try
 			{
-				// The last moment at which abandoning costs nothing. The lock is held from here
-				// through the move, so the answer cannot go stale before the replacement.
 				if (!commitAuthorized.getAsBoolean())
 				{
 					throw new CommitNotAuthorizedException(target);
@@ -185,8 +168,7 @@ final class TelemetrySnapshotWriter
 		}
 		finally
 		{
-			// Whether the move succeeded, failed, was refused, or never ran, no temporary file of
-			// ours is left behind by this attempt.
+			// However the move ended, this attempt leaves no temporary file of ours behind.
 			Files.deleteIfExists(temp);
 		}
 	}
@@ -200,8 +182,8 @@ final class TelemetrySnapshotWriter
 		}
 		catch (AtomicMoveNotSupportedException | UnsupportedOperationException e)
 		{
-			// The only permitted fallback: move the already-complete sibling with replacement. The
-			// target is still never streamed into or partially written.
+			// The only fallback: move the already-complete sibling with replacement. The target is
+			// still never streamed into.
 			mover.move(temp, target, StandardCopyOption.REPLACE_EXISTING);
 		}
 	}
@@ -217,9 +199,9 @@ final class TelemetrySnapshotWriter
 	}
 
 	/**
-	 * Removes temporary files this writer owns that a previous run abandoned, which only happens when
-	 * a client was killed mid-write. Only this writer's own naming is considered, and only once older
-	 * than {@link #STALE_TEMP_AGE_MILLIS}, so a second client's in-flight file is never removed.
+	 * Removes temporary files this writer owns that a previous run abandoned, which happens when a
+	 * client is killed mid-write. Only this writer's own naming and only past the stale age, so a
+	 * second client's in-flight file is never removed.
 	 */
 	void sweepStaleTemporaryFiles() throws IOException
 	{
@@ -239,8 +221,7 @@ final class TelemetrySnapshotWriter
 				}
 				catch (IOException e)
 				{
-					// A temporary file we cannot stat or delete is left alone; it is not worth
-					// failing a publication over.
+					// Not worth failing a publication over.
 				}
 			}
 		}

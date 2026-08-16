@@ -28,21 +28,16 @@ import java.util.Objects;
 
 /**
  * What one fixed item slot holds: an item identity, a quantity, and a name, or nothing. The slot's
- * own position is not stored here, so no entry can disagree with where it sits.
- *
- * Two states and no third: empty, where all three exported values are null, or occupied, where the
- * identity is zero or greater and the quantity is positive. Item identity {@code 0} is a real item
- * and the client signals an empty slot with a negative identity, so occupancy is decided from
- * nullability, never from {@code itemId > 0}.
+ * own position is not stored here, so no entry can disagree with where it sits. Item identity 0 is a
+ * real item and the client signals an empty slot with a negative identity, so occupancy is decided
+ * from nullability rather than from a positive identity.
  */
 final class TelemetryItemSlot
 {
 	static final TelemetryItemSlot EMPTY = new TelemetryItemSlot(null, null, null);
 
-	/**
-	 * The name the game cache reports for an item it has no name for. Treated as no name rather
-	 * than exported as the four characters {@code null} inside a JSON string.
-	 */
+	// The name the game cache reports for an item it has no name for. Treated as no name rather
+	// than exported as the four characters null.
 	private static final String ABSENT_NAME = "null";
 
 	private final Integer itemId;
@@ -57,9 +52,8 @@ final class TelemetryItemSlot
 	}
 
 	/**
-	 * The slot as read from the client. Only a negative identity or a non-positive quantity means
-	 * no item; stack size never affects occupancy, so one slot holding a million coins is one
-	 * occupied slot.
+	 * The slot as read from the client. Stack size never affects occupancy, so one slot holding a
+	 * million coins is one occupied slot.
 	 */
 	static TelemetryItemSlot of(int itemId, int quantity, String name)
 	{
@@ -70,7 +64,6 @@ final class TelemetryItemSlot
 		return new TelemetryItemSlot(itemId, quantity, normalizeName(name));
 	}
 
-	/** Presentation metadata only: nothing decides identity or occupancy from the name. */
 	private static String normalizeName(String raw)
 	{
 		if (raw == null)
