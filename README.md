@@ -1,11 +1,12 @@
 # Facette Companion
 
-A read-only RuneLite plugin that provides your own live game state to the separately installed
-[Facette](https://facette.gg) companion application through one local file.
+A read-only RuneLite plugin that exports a bounded view of your live game state to one documented
+local JSON file. [Facette](https://facette.gg) can read that file as an optional separately
+distributed companion.
 
-Facette is a Windows-first second-screen companion for games. This plugin is the Old School
-RuneScape side of it: while enabled, it keeps one small JSON file up to date with a bounded view
-of your own character, so a companion app on the same machine can show it on a second screen.
+While enabled, the plugin keeps one small JSON file up to date with a bounded view of your own
+character. Any local tool on the same machine can read it. Facette is a Windows-first second-screen
+companion for games, and this plugin is the Old School RuneScape side of it.
 
 ## Distribution
 
@@ -18,11 +19,11 @@ end-user installation path.
 The source is published so that anyone whose game state the plugin reads can read the code doing
 the reading.
 
-## Facette is a separate application
+## Facette is an optional reader
 
-The Facette desktop application is one you install separately, from elsewhere. This plugin writes
-one local file and nothing else. The separately installed Facette application may read the file
-independently.
+Facette is an optional reader of the exported file. It is distributed separately and is not
+required for the plugin to load, run, or write its documented output. Any local tool can read the
+documented JSON file.
 
 This plugin **does not launch, download, install, bundle, execute, or communicate with Facette**,
 and it behaves the same whether Facette is installed, running, or absent.
