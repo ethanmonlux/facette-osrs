@@ -27,9 +27,9 @@ package com.facette.telemetry;
 import java.util.Objects;
 
 /**
- * How much experience one skill gained during the current tracked session. Every number here is a
- * difference between two readings this plugin instance took itself, so no account total, starting
- * total, or level history is held or derivable.
+ * How much experience one skill gained during the current tracked session. Every number is a
+ * difference between two readings this plugin took itself, so no account total, starting total, or
+ * level history is held or derivable.
  */
 final class TelemetrySkillGain
 {
@@ -38,7 +38,6 @@ final class TelemetrySkillGain
 	private final int lastDelta;
 	private final long lastChangedAt;
 
-	/** {@code lastDelta} is one of the gains {@code gained} counts, so it can never exceed it. */
 	TelemetrySkillGain(String skill, int gained, int lastDelta, long lastChangedAt)
 	{
 		this.skill = Objects.requireNonNull(skill, "skill");

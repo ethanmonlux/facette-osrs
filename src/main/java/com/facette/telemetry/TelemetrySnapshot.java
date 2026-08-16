@@ -33,14 +33,13 @@ import java.util.List;
 import java.util.Objects;
 
 /**
- * One immutable schema-2 telemetry snapshot and its canonical JSON form. The schema is closed:
- * every field named here is exported and nothing else is.
+ * One immutable schema-2 telemetry snapshot and its canonical JSON form. The schema is closed: every
+ * field named here is exported and nothing else is.
  *
- * {@link #toJson()} is the contract, written by hand rather than reflected out of this object,
- * both to fix the key order and key set and because reflection is not permitted in a Plugin Hub
- * plugin. Every collection is fixed-size or enum-bounded and every exported string is bounded by
- * {@link #appendString}, so the document stays below
- * {@link TelemetrySnapshotWriter#MAX_SNAPSHOT_BYTES} however long the player plays.
+ * The JSON is written by hand rather than reflected out of this object, both to fix the key order
+ * and because reflection is not permitted in a Plugin Hub plugin. Every collection is fixed-size or
+ * enum-bounded and every exported string is bounded, so the document stays under the writer's size
+ * limit however long the player plays.
  */
 final class TelemetrySnapshot
 {
@@ -48,12 +47,8 @@ final class TelemetrySnapshot
 
 	static final String SOURCE = "runelite";
 
-	/**
-	 * The eleven visible equipment slots, in exported order. These names are the contract and the
-	 * order is part of it: the plugin maps RuneLite's own slots onto this list positionally and a
-	 * test pins that the two agree. The three RuneLite slots that hold no item, the player model's
-	 * arms, hair, and jaw, are absent.
-	 */
+	// The eleven visible equipment slots. These names are the contract and the order is part of it:
+	// the plugin maps RuneLite's own slots onto this list positionally.
 	static final List<String> EQUIPMENT_SLOTS = Collections.unmodifiableList(Arrays.asList(
 		"head", "cape", "amulet", "weapon", "body", "shield", "legs", "gloves", "boots",
 		"ring", "ammo"));
@@ -141,13 +136,11 @@ final class TelemetrySnapshot
 			throw new IllegalArgumentException("emittedAt must be non-negative");
 		}
 
-		// A timestamp later than emission describes the future, which a backward wall-clock
-		// adjustment between an event and this build would produce.
+		// A timestamp later than emission would describe the future.
 		this.trackingStartedAt = atMost(b.trackingStartedAt, emittedAt);
 		this.lastChangedAt = atMost(b.lastChangedAt, emittedAt);
 
-		// Deduplicated by construction, preserving the caller's enum order, so no arrangement of
-		// readings can put one prayer in the document twice.
+		// Deduplicated by construction, so no arrangement of readings repeats a prayer.
 		this.activePrayers = b.activePrayers == null
 			? null
 			: Collections.unmodifiableList(new ArrayList<>(new LinkedHashSet<>(b.activePrayers)));
@@ -197,10 +190,7 @@ final class TelemetrySnapshot
 		return loggedIn;
 	}
 
-	/**
-	 * Key order and key set are fixed here and are the contract Facette reads. Every key is written
-	 * literally once, so a duplicate key is impossible by construction.
-	 */
+	/** Key order and key set are fixed here and are the contract Facette reads. */
 	String toJson()
 	{
 		StringBuilder sb = new StringBuilder(4_096);
@@ -316,8 +306,8 @@ final class TelemetrySnapshot
 				sb.append(',');
 			}
 			sb.append('{');
-			// The label comes from the contract list, not from the entry, so an exported slot name
-			// can never disagree with the position it sits at.
+			// The label comes from the contract list, not the entry, so it cannot disagree with
+			// the position it sits at.
 			String name = EQUIPMENT_SLOTS.get(i);
 			str(sb, "slot", name, name.length()).append(',');
 			appendItemBody(sb, equipmentSlots.get(i));
@@ -340,7 +330,6 @@ final class TelemetrySnapshot
 				sb.append(',');
 			}
 			sb.append('{');
-			// Written from the loop, not from the entry, for the same reason as above.
 			num(sb, "slot", i).append(',');
 			appendItemBody(sb, inventorySlots.get(i));
 			sb.append('}');
@@ -379,7 +368,6 @@ final class TelemetrySnapshot
 		return sb.append(']');
 	}
 
-	/** A key is always a literal, so it is never truncated. */
 	private static StringBuilder key(StringBuilder sb, String k)
 	{
 		appendString(sb, k, k.length());
@@ -405,10 +393,9 @@ final class TelemetrySnapshot
 	}
 
 	/**
-	 * Appends a JSON string literal, bounded to {@code maxChars} and escaping what JSON requires plus
-	 * the remaining control characters. Bounding lives here, the one place every exported string
-	 * passes through, so no caller can opt out. A truncation that would split a surrogate pair steps
-	 * back one character instead.
+	 * Appends a JSON string literal, bounded and escaped. Bounding lives here, the one place every
+	 * exported string passes through, so no caller can opt out. A truncation that would split a
+	 * surrogate pair steps back one character.
 	 */
 	private static StringBuilder appendString(StringBuilder sb, String value, int maxChars)
 	{
@@ -468,10 +455,7 @@ final class TelemetrySnapshot
 		return value == null ? null : Long.valueOf(Math.min(value, ceiling));
 	}
 
-	/**
-	 * Refuses any size but the contract size: padding would claim empty slots the client never
-	 * reported, and truncating would hide items.
-	 */
+	// Padding would claim empty slots the client never reported, and truncating would hide items.
 	private static List<TelemetryItemSlot> copyFixedSlots(List<TelemetryItemSlot> slots,
 		int expectedSize, String what)
 	{
@@ -511,7 +495,6 @@ final class TelemetrySnapshot
 		return Collections.unmodifiableList(copy);
 	}
 
-	/** Assembles a snapshot one exported section at a time, in the order {@link #toJson()} writes. */
 	static final class Builder
 	{
 		private String instanceId;
