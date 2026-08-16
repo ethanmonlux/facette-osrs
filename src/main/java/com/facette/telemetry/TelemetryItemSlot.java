@@ -27,23 +27,16 @@ package com.facette.telemetry;
 import java.util.Objects;
 
 /**
- * What one fixed item slot holds — an item identity, a quantity, and a name, or nothing.
+ * What one fixed item slot holds: an item identity, a quantity, and a name, or nothing. The slot's
+ * own position is not stored here, so no entry can disagree with where it sits.
  *
- * <p>The slot's own position is not stored here. Equipment entries are labelled by the containing
- * collection's canonical slot names and inventory entries by their array position, so no entry can
- * disagree with where it sits.
- *
- * <p>Two states and no third: empty, where all three exported values are null, or occupied, where
- * the identity is zero or greater and the quantity is positive. Item identity {@code 0} is a real
- * item — the client signals an empty slot with a <em>negative</em> identity — so a reader decides
- * occupancy from nullability, never from {@code itemId > 0}.
- *
- * <p>Nothing here is priced, valued, or aggregated, and no RuneLite type is held, so every rule
- * is exercisable without a game client.
+ * Two states and no third: empty, where all three exported values are null, or occupied, where the
+ * identity is zero or greater and the quantity is positive. Item identity {@code 0} is a real item
+ * and the client signals an empty slot with a negative identity, so occupancy is decided from
+ * nullability, never from {@code itemId > 0}.
  */
 final class TelemetryItemSlot
 {
-	/** The empty slot, shared because it carries no state and most slots are empty. */
 	static final TelemetryItemSlot EMPTY = new TelemetryItemSlot(null, null, null);
 
 	/**
@@ -64,14 +57,9 @@ final class TelemetryItemSlot
 	}
 
 	/**
-	 * The slot as read from the client.
-	 *
-	 * @param itemId   the item identity; only a negative value is not an item, because the client
-	 *                 signals an empty slot that way and zero is a real identity
-	 * @param quantity the stack size; a non-positive value is not an item. Stack size never
-	 *                 affects occupancy — one slot holding a million coins is one occupied slot
-	 * @param name     the item's name as the client reports it, or null when it has none
-	 * @return an occupied slot, or {@link #EMPTY} when the reading does not describe an item
+	 * The slot as read from the client. Only a negative identity or a non-positive quantity means
+	 * no item; stack size never affects occupancy, so one slot holding a million coins is one
+	 * occupied slot.
 	 */
 	static TelemetryItemSlot of(int itemId, int quantity, String name)
 	{
@@ -82,11 +70,7 @@ final class TelemetryItemSlot
 		return new TelemetryItemSlot(itemId, quantity, normalizeName(name));
 	}
 
-	/**
-	 * Trims the client's name and reduces a blank or absent one to null. The name is presentation
-	 * metadata only: nothing here or downstream decides identity, occupancy, or any control flow
-	 * from it. Length bounding is left to serialization, where every exported string is bounded.
-	 */
+	/** Presentation metadata only: nothing decides identity or occupancy from the name. */
 	private static String normalizeName(String raw)
 	{
 		if (raw == null)
@@ -112,10 +96,6 @@ final class TelemetryItemSlot
 		return quantity;
 	}
 
-	/**
-	 * The item's name, or null when the client had none to give. Null is the one degenerate case
-	 * an occupied slot can carry.
-	 */
 	String getName()
 	{
 		return name;

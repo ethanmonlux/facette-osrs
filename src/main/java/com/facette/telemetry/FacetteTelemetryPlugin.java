@@ -71,19 +71,21 @@ import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 
 /**
- * Exports a small, sanitized, read-only view of the local player's live state to a single local
- * JSON file for the Facette companion application to read independently.
+ * Exports a read-only view of the local player's live state to one local JSON file for the Facette
+ * companion application to read independently. The flow is one way:
  *
- * <p>One-directional by construction: it reads approved client state through the RuneLite API,
- * normalizes it, and replaces one file inside RuneLite's own data directory. It opens no socket,
- * sends nothing anywhere, reads no command channel, invokes no menu action, and synthesizes no
- * input.
+ * RuneLite client state -&gt; TelemetryState -&gt; bounded TelemetrySnapshot -&gt; local file
  *
- * <p>{@link TelemetrySnapshot} holds the closed list of fields that may leave the client. Two
- * limits are enforced here, at the point of reading rather than at serialization: the local
- * player is read for its combat level and its current interaction only, never for its name, and
- * an interaction is exported only when the other actor is an NPC, so a player target is discarded
- * before it can reach any snapshot.
+ * This class is the only part that touches RuneLite. It samples client state on the client thread,
+ * where those reads are legal, and hands the values to {@link TelemetryState}. Publication runs on
+ * a separate thread owned by each run, so a slow filesystem does not hold up sampling or the client
+ * thread while the plugin is running. The one exception is {@link #shutDown()}, which waits a
+ * bounded {@link #SHUTDOWN_TIMEOUT_SECONDS} for the final write before returning. Nothing flows
+ * back: no command channel, no menu action, no synthesized input, and no network request.
+ *
+ * Schema 2 accepts only an NPC target, so an interacted-with player is discarded here at the point
+ * of reading. Each plugin start owns its own {@link PublisherRunContext}, and only the newest run
+ * may replace the file.
  */
 @Slf4j
 @PluginDescriptor(
@@ -104,18 +106,16 @@ public class FacetteTelemetryPlugin extends Plugin
 	 */
 	private static final long HEARTBEAT_INTERVAL_MILLIS = 1_500L;
 
-	/** Directory created inside RuneLite's canonical data directory. */
 	private static final String DATA_SUBDIRECTORY = "facette";
 
 	/** Bound on how long an orderly shutdown waits for an in-flight publication. */
 	private static final long SHUTDOWN_TIMEOUT_SECONDS = 5L;
 
 	/**
-	 * The eleven visible equipment slots, in the order {@link TelemetrySnapshot#EQUIPMENT_SLOTS}
-	 * names them, so the only slots this plugin can read are the ones the schema declares.
-	 * RuneLite's equipment enumeration also carries the player model's arms, hair, and jaw, which
-	 * never hold an item. The correspondence is positional, and a test pins that the two lists
-	 * agree name for name.
+	 * The eleven visible equipment slots, in the order {@link TelemetrySnapshot#EQUIPMENT_SLOTS} names
+	 * them, so the only slots this plugin can read are the ones the schema declares. RuneLite's
+	 * enumeration also carries the player model's arms, hair, and jaw, which never hold an item. The
+	 * correspondence is positional and a test pins that the two lists agree name for name.
 	 */
 	private static final EquipmentInventorySlot[] EXPORTED_EQUIPMENT_SLOTS = {
 		EquipmentInventorySlot.HEAD,
@@ -132,9 +132,8 @@ public class FacetteTelemetryPlugin extends Plugin
 	};
 
 	/**
-	 * The combat-mode index at which the game's own combat interface consults a second variable to
-	 * pick between a staff's casting and defensive-casting entries. Only the index is written here;
-	 * the label still comes from the game's data.
+	 * The combat-mode index at which the game's combat interface consults a second variable to pick
+	 * between a staff's casting and defensive-casting entries. Only the index is written here.
 	 */
 	private static final int STAFF_CASTING_STYLE_INDEX = 4;
 
@@ -152,34 +151,27 @@ public class FacetteTelemetryPlugin extends Plugin
 	Client client;
 
 	/**
-	 * RuneLite's client-thread dispatcher. Every direct {@link Client} read has to happen on the
-	 * client thread, and enabling the plugin from the configuration panel calls {@link #startUp()}
-	 * on Swing's AWT thread, so startup work is handed here rather than run on whichever thread
-	 * happened to call.
+	 * Every direct {@link Client} read has to happen on the client thread, and enabling the plugin from
+	 * the configuration panel calls {@link #startUp()} on the AWT thread, so startup work is handed
+	 * here rather than run on whichever thread happened to call.
 	 */
 	@Inject
 	ClientThread clientThread;
 
-	/** Wall-clock milliseconds, for exported timestamps only. */
 	private final LongSupplier wallClockMillis;
 
-	/** Monotonic elapsed nanoseconds, for interval decisions only. */
 	private final LongSupplier elapsedNanos;
 
-	/** Supplies each run's instance identity: a fresh random UUID per start in production. */
 	private final Supplier<String> instanceIds;
 
-	/** Supplies the directory the snapshot is written to. */
 	private final Supplier<Path> dataDirectories;
 
-	/** Supplies each run's publisher executor. */
 	private final Supplier<ScheduledExecutorService> executors;
 
 	/**
-	 * Serializes the <em>commit</em> step of publications across runs — the authority check and
-	 * the target replacement, nothing else. Within a run the single publisher thread already
-	 * orders publications; this matters when a retired run's final write and a new run's publisher
-	 * are alive at the same time. Staging is deliberately outside it, so a stalled write delays
+	 * Serializes the commit step of publications across runs, meaning the authority check and the
+	 * target replacement and nothing else. It matters when a retired run's final write and a new run's
+	 * publisher are alive at once. Staging is deliberately outside it, so a stalled write delays
 	 * nobody.
 	 */
 	private final ReentrantLock publishLock = new ReentrantLock();
@@ -191,8 +183,8 @@ public class FacetteTelemetryPlugin extends Plugin
 	private final AtomicLong newestGeneration = new AtomicLong();
 
 	/**
-	 * The run currently being published. Replaced, never mutated, on each start; the previous run
-	 * is retired first and can never become current again.
+	 * The run currently being published. Replaced, never mutated, on each start; the previous run is
+	 * retired first and can never become current again.
 	 */
 	private volatile PublisherRunContext currentRun;
 
@@ -208,10 +200,9 @@ public class FacetteTelemetryPlugin extends Plugin
 	}
 
 	/**
-	 * Test seam. Package-private, and not exposed as plugin configuration, an environment
-	 * variable, or a system property. Every argument the no-argument constructor passes is the
-	 * real production implementation, so this changes no behavior, destination, or schema — it
-	 * only lets a test make the lifecycle deterministic without launching a client.
+	 * Test seam. Package-private, and not exposed as configuration, an environment variable, or a
+	 * system property. Every argument the no-argument constructor passes is the real production
+	 * implementation, so this changes no behavior, destination, or schema.
 	 */
 	FacetteTelemetryPlugin(LongSupplier wallClockMillis, LongSupplier elapsedNanos,
 		Supplier<String> instanceIds, Supplier<Path> dataDirectories,
@@ -235,20 +226,16 @@ public class FacetteTelemetryPlugin extends Plugin
 			new TelemetrySnapshotWriter(dataDirectories.get()));
 		currentRun = run;
 
-		// Nothing here touches the client. Enabling from the configuration panel runs this on
-		// AWT-EventQueue-0, where any Client read fails the client-thread assertion, so the reads
-		// are deferred instead. invoke() runs the callback inline when the caller is already the
-		// client thread and queues it otherwise, so one path serves both.
+		// Nothing here touches the client. Enabling from the configuration panel runs this on the
+		// AWT thread, where any Client read fails the client-thread assertion, so the reads are
+		// deferred instead.
 		clientThread.invoke(() -> initializeOnClientThread(run));
 	}
 
 	/**
-	 * Completes startup on RuneLite's client thread: sample, seed, then publish.
-	 *
-	 * <p>Runs later than {@link #startUp()} when the plugin was enabled from the configuration
-	 * panel, so it first establishes that the run it was created for is still the current one. A
-	 * user who disabled the plugin in the meantime leaves this callback bound to a retired run,
-	 * and it must do nothing rather than write over what the newer run has already put on disk.
+	 * Completes startup on the client thread: sample, seed, then publish. It runs later than
+	 * {@link #startUp()} when the plugin was enabled from the configuration panel, so a run retired in
+	 * the meantime must do nothing rather than write over what a newer run already put on disk.
 	 */
 	private void initializeOnClientThread(PublisherRunContext run)
 	{
@@ -261,9 +248,8 @@ public class FacetteTelemetryPlugin extends Plugin
 		try
 		{
 			// Seeding is folded into the sample rather than performed here, so a callback landing
-			// during a world hop or loading screen — where there is no live session to read totals
-			// from — leaves seeding to the first live sample instead of skipping it for the whole
-			// run.
+			// during a world hop or loading screen, where there is no live session to read totals
+			// from, leaves seeding to the first live sample instead of skipping it for the run.
 			sampleClientState(run.getState());
 			// Only now may anything publish: no snapshot can be built from a partly initialized run.
 			run.markInitialized();
@@ -271,9 +257,9 @@ public class FacetteTelemetryPlugin extends Plugin
 		}
 		catch (RuntimeException | Error e)
 		{
-			// Leave nothing half-started. The run is retired so any straggler is inert, no
-			// publisher is left behind, and no active snapshot is written — the file simply stops
-			// advancing and reads as stale, which is honest about a failed start.
+			// Leave nothing half-started. The run is retired so any straggler is inert, no publisher
+			// is left behind, and no active snapshot is written. The file simply stops advancing and
+			// reads as stale, which is honest about a failed start.
 			run.retire();
 			run.abandonPublisher();
 			log.error("Facette Telemetry failed to start; no telemetry will be published", e);
@@ -284,9 +270,8 @@ public class FacetteTelemetryPlugin extends Plugin
 	private void startPublisher(PublisherRunContext run)
 	{
 		ScheduledExecutorService executor = executors.get();
-		// Adopted before anything is scheduled on it. The first tick has a zero initial delay and
-		// can run before scheduleWithFixedDelay even returns, so a disable landing in that gap has
-		// to find a publisher to stop.
+		// Adopted before anything is scheduled on it, because the first tick has a zero initial
+		// delay and can run before scheduleWithFixedDelay returns.
 		if (!run.attachPublisherIfCurrent(executor))
 		{
 			// Disabled while this callback was sampling and seeding. Shutdown has already run and
@@ -330,9 +315,9 @@ public class FacetteTelemetryPlugin extends Plugin
 
 		if (!run.hasPublisher())
 		{
-			// Never got as far as publishing — a startup that failed, or one disabled before its
-			// client-thread callback ran. Deliberately writes nothing: a run that never published
-			// has no state worth reporting.
+			// Never got as far as publishing: a startup that failed, or one disabled before its
+			// client-thread callback ran. Deliberately writes nothing, because a run that never
+			// published has no state worth reporting.
 			run.abandonPublisher();
 			log.debug("Facette Telemetry stopped before it published; no final snapshot written");
 			return;
@@ -356,16 +341,12 @@ public class FacetteTelemetryPlugin extends Plugin
 	}
 
 	/**
-	 * The run currently publishing, or null when there is none or it has already been retired.
-	 *
-	 * <p>Callers branch on {@link PublisherRunContext#isInitialized()}. An event arriving between
-	 * {@code startUp()} and the client-thread callback must not reach a partly built run, and for
-	 * game state, world, vitals, and inventory nothing is lost by dropping it: the first sample
-	 * after initialization reads the live client. Experience is the exception — a gain is an event
-	 * no later sample can reconstruct.
-	 *
-	 * <p>Called from the RuneLite client thread only, which is also the thread that replaces the
-	 * run, so a handler never observes a half-started one.
+	 * The run currently publishing, or null when there is none or it has been retired. Called from the
+	 * client thread only, which is also the thread that replaces the run, so a handler never observes a
+	 * half-started one. Callers branch on {@link PublisherRunContext#isInitialized()}: dropping a game
+	 * state, world, vitals, or inventory event before initialization loses nothing, since the first
+	 * sample afterwards reads the live client, but experience is an event no later sample can
+	 * reconstruct.
 	 */
 	private PublisherRunContext liveRun()
 	{
@@ -384,7 +365,7 @@ public class FacetteTelemetryPlugin extends Plugin
 		}
 		if (!run.isInitialized())
 		{
-			// Still starting. The transition itself needs no handling, but a session *ending* does:
+			// Still starting. The transition itself needs no handling, but a session ending does:
 			// experience totals retained during startup belong to the session that ended, and if
 			// startup spans a logout and a new login, seeding against them would measure one
 			// character's total against another's.
@@ -412,12 +393,9 @@ public class FacetteTelemetryPlugin extends Plugin
 	}
 
 	/**
-	 * Records an experience total, either as an observation or — before the run has finished
-	 * initializing — as a total to be measured against once it has.
-	 *
-	 * <p>A gain is not a value the client holds; it is the difference between two totals, so
-	 * discarding the earlier total loses the gain. Seeding afterwards from the live totals would
-	 * quietly absorb everything earned while startup was queued.
+	 * Records an experience total, as an observation once the run has initialized and otherwise as a
+	 * total to measure against later. A gain is the difference between two totals, so discarding the
+	 * earlier total loses the gain.
 	 */
 	@Subscribe
 	public void onStatChanged(StatChanged statChanged)
@@ -438,16 +416,13 @@ public class FacetteTelemetryPlugin extends Plugin
 			run.getState().recordPreInitialXp(skill.name(), statChanged.getXp());
 			return;
 		}
-		// Only the skill and the increase are kept; the total is a comparison baseline and is never
-		// exported. The enum position travels with the name so the exported per-skill collection
-		// can be ordered deterministically without the state holding a RuneLite type.
+		// Only the skill and the increase are kept: the total is a comparison baseline and is never
+		// exported. The enum position travels with the name so the exported collection can be
+		// ordered deterministically without the state holding a RuneLite type.
 		run.getState().observeXp(skill.name(), skill.ordinal(), statChanged.getXp());
 	}
 
-	/**
-	 * Reads the approved client state into {@code state}. Called from the client thread only, so
-	 * the values are consistent with the tick that produced them.
-	 */
+	/** Reads supported client state into {@code state}. Called from the client thread only. */
 	private void sampleClientState(TelemetryState state)
 	{
 		GameState gameState = client.getGameState();
@@ -491,22 +466,16 @@ public class FacetteTelemetryPlugin extends Plugin
 		state.updateEquipment(readEquipmentSlots());
 		state.updateInventory(readInventorySlots());
 
-		// Last, and only after every required value has been offered: this is what allows the
-		// session to be reported as carrying valid player data, and it refuses while anything is
-		// still missing.
+		// Last, and only after every required value has been offered. It refuses while anything is
+		// still missing, so the session is reported as live only with a complete player block.
 		state.markPlayerStateComplete();
 	}
 
 	/**
-	 * The player-readable label for the currently selected attack style, or null when no
-	 * trustworthy reading exists.
-	 *
-	 * <p>The label is the game's own: this walks the client's own lookup path — weapon category,
-	 * style list, style entry, name parameter — so nothing here maps a number onto a word. Every
-	 * step that can fail yields null rather than a guess, including a weapon category the game's
-	 * own style enumeration has no entry for.
-	 *
-	 * <p>Called from the client thread only.
+	 * The label for the currently selected attack style, or null when no trustworthy reading exists.
+	 * The label is the game's own: this walks the client's lookup path from weapon category to style
+	 * list to style entry to name parameter, so nothing here maps a number onto a word. Every step
+	 * that can fail yields null rather than a guess.
 	 */
 	private String readAttackStyle()
 	{
@@ -558,8 +527,7 @@ public class FacetteTelemetryPlugin extends Plugin
 	}
 
 	/**
-	 * Lowercases and trims the game's style name, and reduces a blank one — or the game's own "no
-	 * style here" marker — to no reading at all.
+	 * Reduces a blank name, or the game's own "no style here" marker, to no reading at all.
 	 */
 	private static String normalizeAttackStyle(String raw)
 	{
@@ -576,16 +544,13 @@ public class FacetteTelemetryPlugin extends Plugin
 	}
 
 	/**
-	 * The prayers currently active, as lowercase RuneLite prayer names in enum order. Each prayer
-	 * is visited exactly once in the enumeration's own order, so the result is deterministic,
-	 * cannot contain a duplicate, and is bounded by the enumeration rather than by play time.
+	 * The active prayers, as lowercase RuneLite prayer names in enum order. Each prayer is visited
+	 * once, so the result is deterministic, cannot contain a duplicate, and is bounded by the
+	 * enumeration rather than by play time.
 	 *
-	 * <p>Two prayer pairs need more than their own variable to resolve: the upgraded ranged and
-	 * magic prayers share a slot with the ones they replace, so the older prayer's variable reads
-	 * as active when the newer is in use. Which of the pair is really active is decided by whether
-	 * the upgrade is unlocked, and unlocks are suspended inside Last Man Standing.
-	 *
-	 * <p>Called from the client thread only.
+	 * The upgraded ranged and magic prayers share a slot with the ones they replace, so the older
+	 * prayer's variable reads as active when the newer is in use. Which of the pair is really active
+	 * depends on whether the upgrade is unlocked, and unlocks are suspended inside Last Man Standing.
 	 */
 	private List<String> readActivePrayers()
 	{
@@ -631,13 +596,9 @@ public class FacetteTelemetryPlugin extends Plugin
 	}
 
 	/**
-	 * The NPC the local player is interacting with, or null.
-	 *
-	 * <p>The type check is the privacy boundary. A player can be interacted with too — followed,
-	 * traded, attacked — and that actor carries another person's display name. Anything that is not
-	 * an NPC is discarded here and has no path any further into the snapshot.
-	 *
-	 * <p>Called from the client thread only.
+	 * The NPC the local player is interacting with, or null. This type check is the privacy boundary:
+	 * an interacted-with player carries another person's display name, so anything that is not an NPC
+	 * is discarded here and has no path further into the snapshot.
 	 */
 	private static TelemetryTarget readNpcTarget(Player localPlayer)
 	{
@@ -662,9 +623,8 @@ public class FacetteTelemetryPlugin extends Plugin
 	}
 
 	/**
-	 * The eleven visible equipment slots, or null when the client has no equipment container to
-	 * read. Null means "not read", and the state keeps whatever it last saw rather than reporting
-	 * everything as unequipped. Called from the client thread only.
+	 * The eleven visible equipment slots, or null when there is no equipment container. Null means
+	 * "not read", so the state keeps what it last saw rather than reporting everything as unequipped.
 	 */
 	private List<TelemetryItemSlot> readEquipmentSlots()
 	{
@@ -681,10 +641,7 @@ public class FacetteTelemetryPlugin extends Plugin
 		return slots;
 	}
 
-	/**
-	 * All twenty-eight inventory slots in ascending order, or null when the client has no inventory
-	 * container to read. Called from the client thread only.
-	 */
+	/** All twenty-eight inventory slots, or null when the client has no inventory container. */
 	private List<TelemetryItemSlot> readInventorySlots()
 	{
 		Item[] inventory = itemsOf(InventoryID.INV);
@@ -707,9 +664,8 @@ public class FacetteTelemetryPlugin extends Plugin
 	}
 
 	/**
-	 * One slot's contents. A slot beyond the container's own array is empty rather than an error:
-	 * container sizes are the client's business, and a schema-fixed slot the client does not carry
-	 * holds nothing by definition.
+	 * One slot's contents. A slot beyond the container's own array is empty rather than an error, since
+	 * a schema-fixed slot the client does not carry holds nothing by definition.
 	 */
 	private TelemetryItemSlot readItemSlot(Item[] items, int slot)
 	{
@@ -727,10 +683,7 @@ public class FacetteTelemetryPlugin extends Plugin
 		return TelemetryItemSlot.of(item.getId(), item.getQuantity(), itemName(item.getId()));
 	}
 
-	/**
-	 * The item's name, for presentation only — identity is the item id passed in, and nothing here
-	 * or downstream decides occupancy or control flow from the returned string.
-	 */
+	/** Presentation only: identity is the item id passed in. */
 	private String itemName(int itemId)
 	{
 		ItemComposition composition = client.getItemDefinition(itemId);
@@ -744,22 +697,18 @@ public class FacetteTelemetryPlugin extends Plugin
 	}
 
 	/**
-	 * Seeds the experience baselines from the client's current totals, for the case where the
-	 * plugin is enabled while the player is already logged in — RuneLite's login-time experience
-	 * events fired before the plugin was running, so nothing has filled the baselines and the next
-	 * real gain would be consumed as a first observation and never exported.
-	 *
-	 * <p>Called from the first live sample of a session rather than from startup, so the totals
-	 * read here belong to a real logged-in character. Where {@link TelemetryState#recordPreInitialXp}
-	 * retained an earlier total, seeding measures against that instead and exports the difference.
+	 * Seeds the experience baselines from the client's current totals, for the case where the plugin is
+	 * enabled while the player is already logged in and the login-time events have long since fired.
+	 * Called from the first live sample of a session, so the totals belong to a real logged-in
+	 * character.
 	 */
 	private void seedXpBaselines(TelemetryState state)
 	{
 		for (Skill skill : Skill.values())
 		{
 			// Defensive: this builds against latest.release, and the cost of being wrong is passing
-			// a non-skill — or a null — to getSkillExperience. Checked on the entry and its name,
-			// never on ordinal position or array length.
+			// a null or a non-skill to getSkillExperience. Checked on the entry and its name, never
+			// on ordinal position or array length.
 			if (skill == null || "OVERALL".equals(skill.name()))
 			{
 				continue;
@@ -772,9 +721,9 @@ public class FacetteTelemetryPlugin extends Plugin
 	}
 
 	/**
-	 * Whether reaching this game state ends the play session, discarding the experience baselines
-	 * so a later login cannot inherit them. Every login passes through {@link GameState#LOGGING_IN},
-	 * so a world hop or a brief loading screen keeps its baselines while a new login never does.
+	 * Whether reaching this state ends the play session, discarding the experience baselines. Every
+	 * login passes through {@link GameState#LOGGING_IN}, so a world hop or loading screen keeps its
+	 * baselines while a new login never does.
 	 */
 	private static boolean endsSession(GameState gameState)
 	{
@@ -784,15 +733,10 @@ public class FacetteTelemetryPlugin extends Plugin
 	}
 
 	/**
-	 * One scheduled publication attempt, permanently bound to the run that scheduled it.
-	 *
-	 * <p>The currency check is an optimization, not the safeguard: a run retired after it passes
-	 * still cannot land on a newer run's file, because the writer re-checks commit authority under
-	 * the lock immediately before replacing the target.
-	 *
-	 * <p>Unchecked failures are contained here. A periodic task that throws is cancelled by the
-	 * executor and never runs again, so one unexpected runtime failure would silently end
-	 * publication for the rest of the run and leave the file reading as live-but-frozen.
+	 * One scheduled publication attempt, bound to the run that scheduled it. The currency check is an
+	 * optimization, not the safeguard: the writer re-checks commit authority under the lock
+	 * immediately before replacing the target. Unchecked failures are contained here, because a
+	 * periodic task that throws is cancelled by its executor and would silently end publication.
 	 */
 	private void publishTick(PublisherRunContext run)
 	{
@@ -817,12 +761,9 @@ public class FacetteTelemetryPlugin extends Plugin
 	}
 
 	/**
-	 * Publishes one snapshot through the run that owns it. Everything this touches comes from
-	 * {@code run}, so a publication can only ever reach the state, writer, sequence, and
-	 * bookkeeping of the run that issued it, whatever the interleaving.
-	 *
-	 * <p>{@link #publishLock} is not held across this method; it is handed to the writer, which
-	 * takes it only across the commit step.
+	 * Publishes one snapshot through the run that owns it. Everything comes from {@code run}, so a
+	 * publication can only reach the state, writer, and sequence of the run that issued it.
+	 * {@link #publishLock} is handed to the writer, which takes it only across the commit step.
 	 */
 	private void publish(PublisherRunContext run, boolean pluginActive)
 	{
@@ -830,8 +771,8 @@ public class FacetteTelemetryPlugin extends Plugin
 		TelemetrySnapshot snapshot = publishingState.nextSnapshot(pluginActive);
 		try
 		{
-			// The authority check runs inside the writer, immediately before it replaces the
-			// target — not here, where a slow write could make the answer stale before it mattered.
+			// The authority check runs inside the writer, immediately before it replaces the target,
+			// rather than here where a slow write could make the answer stale before it mattered.
 			int bytes = run.getWriter().write(snapshot, publishLock, run::isCommitAuthorized);
 			// The sequence advances only for a snapshot that actually reached the file, and only on
 			// the state that issued it.
@@ -840,8 +781,8 @@ public class FacetteTelemetryPlugin extends Plugin
 		}
 		catch (TelemetrySnapshotWriter.CommitNotAuthorizedException e)
 		{
-			// Expected whenever a newer run started while this one was writing — the staged file
-			// has been discarded and the target left alone. The sequence and bookkeeping are
+			// Expected whenever a newer run started while this one was writing. The staged file has
+			// been discarded and the target left alone, and the sequence and bookkeeping are
 			// untouched because recordPublished was skipped.
 			log.debug("Abandoned a telemetry snapshot superseded by a newer plugin run");
 		}
@@ -853,19 +794,13 @@ public class FacetteTelemetryPlugin extends Plugin
 		}
 	}
 
-	/**
-	 * The plugin's data directory inside RuneLite's canonical data directory. The production
-	 * destination, and the only one the no-argument constructor ever supplies.
-	 */
+	/** The production destination, and the only one the no-argument constructor supplies. */
 	private static Path runeLiteDataDirectory()
 	{
 		return new File(RuneLite.RUNELITE_DIR, DATA_SUBDIRECTORY).toPath();
 	}
 
-	/**
-	 * The production publisher: one daemon thread per run, named so it is identifiable in a thread
-	 * dump, and daemon so it can never hold the client open.
-	 */
+	/** One daemon thread per run, named for a thread dump and daemon so it cannot hold the client open. */
 	private static ScheduledExecutorService newPublisherExecutor()
 	{
 		return Executors.newSingleThreadScheduledExecutor(runnable ->

@@ -75,21 +75,9 @@ import net.runelite.api.gameval.VarbitID;
 import net.runelite.client.callback.ClientThread;
 
 /**
- * Drives {@link FacetteTelemetryPlugin}'s real lifecycle — its startup marshalling, deferred
- * initialization, event handlers, publisher ownership, and shutdown — without a game client.
- *
- * <p>Reaching this behaviour at all needs a stand-in for {@link Client}, which is why the
- * lifecycle rules are pinned here rather than beside the code that enforces them.
- *
- * <p>Nothing here launches RuneLite, authenticates, reads a credential, touches the operator's
- * real RuneLite directory, opens a socket, or starts a thread. The client and its thread
- * dispatcher are mocked, the clocks are held still and moved deliberately, the publisher runs
- * on a fake executor this test drains by hand, and the snapshot is written into a temporary
- * directory the rule deletes. Ordering is established by draining explicit queues rather than
- * by sleeping, so no test here can pass or fail on timing.
- *
- * <p>Distinct from {@code FacetteTelemetryPluginTest}, which is not a test at all: it is the
- * RuneLite development-client launcher behind {@code gradlew run}, and is left untouched.
+ * Drives {@link FacetteTelemetryPlugin}'s real lifecycle without a game client. The client and its
+ * thread dispatcher are mocked, the clocks are moved deliberately, and the publisher runs on a fake
+ * executor this test drains by hand, so ordering is exact rather than timing-dependent.
  */
 public class FacetteTelemetryPluginLifecycleTest
 {
@@ -201,7 +189,7 @@ public class FacetteTelemetryPluginLifecycleTest
 	@After
 	public void tearDown()
 	{
-		// Case 12. Every executor the plugin took must be disposed of by the plugin itself —
+		// Case 12. Every executor the plugin took must be disposed of by the plugin itself:
 		// a leaked one is a leaked publisher thread in production.
 		for (ControlledPublisher executor : executors)
 		{
@@ -223,11 +211,8 @@ public class FacetteTelemetryPluginLifecycleTest
 	}
 
 	/**
-	 * A client in a live logged-in session with everything the plugin needs to complete a sample.
-	 *
-	 * <p>Deliberately complete: the exported {@code loggedIn} flag reports whether the document
-	 * carries valid player data, so a client missing its containers or its local player is a
-	 * different scenario, covered separately.
+	 * A client in a live logged-in session with everything the plugin needs to complete a sample. A
+	 * client missing its containers or its local player is a different scenario, covered separately.
 	 */
 	private void logInClient()
 	{
@@ -282,10 +267,8 @@ public class FacetteTelemetryPluginLifecycleTest
 	}
 
 	/**
-	 * Reads a value out of the document by key, including an array or object value.
-	 *
-	 * <p>Takes the first occurrence, which is the top-level one for every key this class asks
-	 * about. Exact whole-document equality is pinned in {@code TelemetrySnapshotTest} instead.
+	 * Takes the first occurrence, which is the top-level one for every key this class asks about.
+	 * Exact whole-document equality is pinned in {@code TelemetrySnapshotTest} instead.
 	 */
 	private static String value(String json, String key)
 	{
@@ -852,9 +835,8 @@ public class FacetteTelemetryPluginLifecycleTest
 	}
 
 	/**
-	 * The three RuneLite equipment slots that only exist on the player model — arms, hair, and
-	 * jaw — must not appear, and each exported slot must read from the client slot the schema
-	 * names.
+	 * The three RuneLite equipment slots that only exist on the player model (arms, hair, and jaw)
+	 * must not appear, and each exported slot must read from the client slot the schema names.
 	 */
 	@Test
 	public void onlyTheElevenVisibleEquipmentSlotsAreReadAndTheyKeepTheirOwnPositions()
@@ -926,8 +908,8 @@ public class FacetteTelemetryPluginLifecycleTest
 	}
 
 	/**
-	 * The privacy boundary, driven end to end. A player can be interacted with — followed,
-	 * traded, attacked — and that actor carries another person's display name. Nothing about it
+	 * The privacy boundary, driven end to end. A player can be interacted with by following,
+	 * trading, or attacking, and that actor carries another person's display name. Nothing about it
 	 * may reach the file.
 	 */
 	@Test
@@ -974,8 +956,8 @@ public class FacetteTelemetryPluginLifecycleTest
 
 	/**
 	 * A logged-in client whose local player has not resolved yet cannot produce a complete player
-	 * block, so the document must not claim one — and must not invent an empty inventory or an
-	 * empty prayer list in its place.
+	 * block, so the document must not claim one, and must not invent an empty inventory or an empty
+	 * prayer list in its place.
 	 */
 	@Test
 	public void anIncompleteLiveSampleIsReportedAsCarryingNoPlayerDataRatherThanEmptyCollections()
@@ -1084,7 +1066,7 @@ public class FacetteTelemetryPluginLifecycleTest
 		executor.runScheduledTaskOnce();
 		String firstSnapshot = snapshotOnDisk();
 
-		// A heartbeat is now due, so the next tick really does build a snapshot — and building one
+		// A heartbeat is now due, so the next tick really does build a snapshot, and building one
 		// reads the wall clock, which is where the failure is delivered.
 		elapsed += HEARTBEAT_MILLIS * 1_000_000L;
 		wallClockFails = true;
@@ -1366,17 +1348,10 @@ public class FacetteTelemetryPluginLifecycleTest
 	// --- the controlled publisher ---------------------------------------------------------------
 
 	/**
-	 * A publisher executor that runs nothing on its own.
-	 *
-	 * <p>Real threads would make every assertion here a race, and waiting on them would make the
-	 * suite depend on timing. This records what the plugin scheduled and what it submitted, and
-	 * runs either only when a test says so, which is what makes publication and shutdown
-	 * ordering exact rather than probable.
-	 *
-	 * <p>Only the six methods the plugin actually calls are given behavior. The rest of
-	 * {@link ScheduledExecutorService} is left at its default, because a stub that merely throws
-	 * would say nothing a reader needs and this class is already the least interesting part of
-	 * the test.
+	 * A publisher executor that runs nothing on its own. Real threads would make every assertion
+	 * here a race, so this records what the plugin scheduled and what it submitted and runs either
+	 * only when a test says so, which makes publication and shutdown ordering exact rather than
+	 * probable. Only the methods the plugin actually calls are given behavior.
 	 */
 	private final class ControlledPublisher
 	{

@@ -28,13 +28,8 @@ import net.runelite.client.RuneLite;
 import net.runelite.client.externalplugins.ExternalPluginManager;
 
 /**
- * The RuneLite development-client launcher from the official plugin template.
- *
- * <p>This is not an automated test: it starts a real client with this plugin loaded, for the
- * operator's manual validation. It requires a RuneLite development client and, where the
- * operator's account needs one, a Jagex Account authorization the operator handles privately.
- * The automated suite is in the other test classes and needs no account, credential, network
- * service, Facette installation, or game session.
+ * The RuneLite development-client launcher from the official plugin template. Not an automated
+ * test: it starts a real client with this plugin loaded, for the operator's manual validation.
  */
 public class FacetteTelemetryPluginTest
 {

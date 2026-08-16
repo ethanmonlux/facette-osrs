@@ -33,63 +33,45 @@ import java.util.List;
 import java.util.Objects;
 
 /**
- * One immutable schema-2 telemetry snapshot and its canonical JSON form.
+ * One immutable schema-2 telemetry snapshot and its canonical JSON form. The schema is closed:
+ * every field named here is exported and nothing else is.
  *
- * <p>The schema is closed: every field named here is authorized and nothing else is exported.
- * There is no account identity, credential, chat, social, wealth, bank, price, Grand Exchange,
- * quest, or location data, no player target, and no total or historical account experience.
- *
- * <p>The JSON is written by hand rather than reflected out of this object, both to fix the key
- * order and key set and because reflection is not permitted in a Plugin Hub plugin.
- * {@link #toJson()} is the contract: one statement per exported field, in exported order.
- *
- * <p>Every collection is fixed-size or enum-bounded — eleven equipment slots, twenty-eight
- * inventory slots, at most one entry per prayer, at most one per real skill — and every exported
- * string is length-bounded by {@link #appendString}, so the document cannot grow with how long
- * the player plays and stays below {@link TelemetrySnapshotWriter#MAX_SNAPSHOT_BYTES}.
- *
- * <p>Holds no RuneLite types, so the exported contract is exercisable without a game client.
+ * {@link #toJson()} is the contract, written by hand rather than reflected out of this object,
+ * both to fix the key order and key set and because reflection is not permitted in a Plugin Hub
+ * plugin. Every collection is fixed-size or enum-bounded and every exported string is bounded by
+ * {@link #appendString}, so the document stays below
+ * {@link TelemetrySnapshotWriter#MAX_SNAPSHOT_BYTES} however long the player plays.
  */
 final class TelemetrySnapshot
 {
-	/** Schema version of the exported contract. */
 	static final int SCHEMA = 2;
 
-	/** Producer of the snapshot. */
 	static final String SOURCE = "runelite";
 
 	/**
 	 * The eleven visible equipment slots, in exported order. These names are the contract and the
-	 * order is part of it; the plugin maps RuneLite's own slots onto this list positionally and a
-	 * test pins that the two agree. The three RuneLite slots that hold no item — the player
-	 * model's arms, hair, and jaw — are absent.
+	 * order is part of it: the plugin maps RuneLite's own slots onto this list positionally and a
+	 * test pins that the two agree. The three RuneLite slots that hold no item, the player model's
+	 * arms, hair, and jaw, are absent.
 	 */
 	static final List<String> EQUIPMENT_SLOTS = Collections.unmodifiableList(Arrays.asList(
 		"head", "cape", "amulet", "weapon", "body", "shield", "legs", "gloves", "boots",
 		"ring", "ammo"));
 
-	/** Old School inventory capacity, in slots. */
 	static final int INVENTORY_SLOTS = 28;
 
-	/** Bound on the exported instance identity, which is always a canonical UUID. */
 	static final int MAX_INSTANCE_ID_CHARS = 36;
 
-	/** Bound on the exported game-state name. */
 	static final int MAX_GAME_STATE_CHARS = 32;
 
-	/** Bound on the exported attack-style label. */
 	static final int MAX_ATTACK_STYLE_CHARS = 32;
 
-	/** Bound on an exported prayer name. */
 	static final int MAX_PRAYER_CHARS = 32;
 
-	/** Bound on an exported skill name. */
 	static final int MAX_SKILL_CHARS = 24;
 
-	/** Bound on an exported item name. */
 	static final int MAX_ITEM_NAME_CHARS = 48;
 
-	/** Bound on an exported NPC name. */
 	static final int MAX_NPC_NAME_CHARS = 48;
 
 	private final String instanceId;
@@ -159,9 +141,8 @@ final class TelemetrySnapshot
 			throw new IllegalArgumentException("emittedAt must be non-negative");
 		}
 
-		// A timestamp later than the moment of emission describes the future. A backward wall-clock
-		// adjustment between an event and this build would produce one, so it is pinned here rather
-		// than left to whichever caller read the clock first.
+		// A timestamp later than emission describes the future, which a backward wall-clock
+		// adjustment between an event and this build would produce.
 		this.trackingStartedAt = atMost(b.trackingStartedAt, emittedAt);
 		this.lastChangedAt = atMost(b.lastChangedAt, emittedAt);
 
@@ -217,10 +198,8 @@ final class TelemetrySnapshot
 	}
 
 	/**
-	 * Serializes this snapshot to its canonical compact JSON form.
-	 *
-	 * <p>Key order and key set are fixed by this method and are the contract Facette reads. Every
-	 * key is written literally exactly once, so a duplicate key is impossible by construction.
+	 * Key order and key set are fixed here and are the contract Facette reads. Every key is written
+	 * literally once, so a duplicate key is impossible by construction.
 	 */
 	String toJson()
 	{
@@ -283,7 +262,6 @@ final class TelemetrySnapshot
 		return sb.toString();
 	}
 
-	/** Serializes this snapshot to the exact UTF-8 bytes written to disk. */
 	byte[] toJsonBytes()
 	{
 		return toJson().getBytes(StandardCharsets.UTF_8);
@@ -401,28 +379,25 @@ final class TelemetrySnapshot
 		return sb.append(']');
 	}
 
-	/** Appends {@code "key":} — a key is always a literal, so it is never truncated. */
+	/** A key is always a literal, so it is never truncated. */
 	private static StringBuilder key(StringBuilder sb, String k)
 	{
 		appendString(sb, k, k.length());
 		return sb.append(':');
 	}
 
-	/** Appends {@code "key":<number>}, or {@code "key":null}. */
 	private static StringBuilder num(StringBuilder sb, String k, Number value)
 	{
 		key(sb, k);
 		return value == null ? sb.append("null") : sb.append(value.longValue());
 	}
 
-	/** Appends {@code "key":true} or {@code "key":false}. */
 	private static StringBuilder bool(StringBuilder sb, String k, boolean value)
 	{
 		key(sb, k);
 		return sb.append(value);
 	}
 
-	/** Appends {@code "key":"<bounded string>"}, or {@code "key":null}. */
 	private static StringBuilder str(StringBuilder sb, String k, String value, int maxChars)
 	{
 		key(sb, k);
@@ -430,14 +405,10 @@ final class TelemetrySnapshot
 	}
 
 	/**
-	 * Appends a JSON string literal, bounded to {@code maxChars} characters and escaping every
-	 * character JSON requires plus all remaining control characters.
-	 *
-	 * <p>Bounding lives here, in the one place every exported string passes through, which is what
-	 * makes the document size provably bounded: no caller can opt out by forgetting to truncate.
-	 *
-	 * <p>A truncation that would land between the halves of a surrogate pair steps back one
-	 * character instead, so the result is never a lone surrogate.
+	 * Appends a JSON string literal, bounded to {@code maxChars} and escaping what JSON requires plus
+	 * the remaining control characters. Bounding lives here, the one place every exported string
+	 * passes through, so no caller can opt out. A truncation that would split a surrogate pair steps
+	 * back one character instead.
 	 */
 	private static StringBuilder appendString(StringBuilder sb, String value, int maxChars)
 	{
@@ -498,8 +469,8 @@ final class TelemetrySnapshot
 	}
 
 	/**
-	 * Copies a fixed-size slot collection, refusing any other size. The size is the contract:
-	 * padding would claim empty slots the client never reported, truncating would hide items.
+	 * Refuses any size but the contract size: padding would claim empty slots the client never
+	 * reported, and truncating would hide items.
 	 */
 	private static List<TelemetryItemSlot> copyFixedSlots(List<TelemetryItemSlot> slots,
 		int expectedSize, String what)
@@ -540,13 +511,7 @@ final class TelemetrySnapshot
 		return Collections.unmodifiableList(copy);
 	}
 
-	/**
-	 * Assembles a snapshot one exported section at a time.
-	 *
-	 * <p>The setters correspond one-for-one with the JSON objects {@link #toJson()} writes —
-	 * envelope, session, vitals, combat, equipment, inventory, xp — so this type lines up against
-	 * the schema section by section.
-	 */
+	/** Assembles a snapshot one exported section at a time, in the order {@link #toJson()} writes. */
 	static final class Builder
 	{
 		private String instanceId;

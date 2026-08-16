@@ -51,8 +51,6 @@ import org.junit.rules.TemporaryFolder;
 /**
  * Covers the guarantee a reader depends on: the target file is always a complete document,
  * replaced in one step, never larger than the ceiling, and never left with our debris.
- *
- * <p>Needs no account, credential, network service, Facette installation, or game session.
  */
 public class TelemetrySnapshotWriterTest
 {
@@ -136,7 +134,7 @@ public class TelemetrySnapshotWriterTest
 
 	/**
 	 * Schema 2 lands beside a schema-1 file, never on top of it and never through it. The old
-	 * file is not read, not migrated, and not deleted — a reader that still wants it finds it
+	 * file is not read, not migrated, and not deleted, so a reader that still wants it finds it
 	 * exactly as it was, going stale on its own.
 	 */
 	@Test
@@ -236,7 +234,7 @@ public class TelemetrySnapshotWriterTest
 	/**
 	 * The writer's size guard is a backstop, not the primary bound: every string schema 2 exports
 	 * is length-bounded at serialization and every collection it exports is fixed-size or
-	 * enum-bounded, so no snapshot the plugin can build reaches the ceiling — the measured worst
+	 * enum-bounded, so no snapshot the plugin can build reaches the ceiling. The measured worst
 	 * case is pinned in {@code TelemetrySnapshotTest}. The guard still has to work, so it is
 	 * exercised here through the one collection whose length is the caller's to choose.
 	 */
@@ -279,12 +277,10 @@ public class TelemetrySnapshotWriterTest
 	}
 
 	/**
-	 * A snapshot of an exact serialized size, grown through the active-prayer collection.
-	 *
-	 * <p>Every entry is distinct, because the document deduplicates, and every entry stays inside
-	 * the exported prayer-name bound, because serialization truncates. Those two constraints are
-	 * why the size is reached by adding entries and then lengthening the last one rather than by
-	 * padding a single string.
+	 * A snapshot of an exact serialized size, grown through the active-prayer collection. Entries must
+	 * be distinct because the document deduplicates, and each must stay inside the prayer-name bound
+	 * because serialization truncates, which is why the size is reached by adding entries and then
+	 * lengthening the last one rather than by padding one string.
 	 */
 	private static TelemetrySnapshot paddedSnapshot(int targetBytes)
 	{

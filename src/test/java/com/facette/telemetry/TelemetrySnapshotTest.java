@@ -41,16 +41,12 @@ import static org.junit.Assert.fail;
 import org.junit.Test;
 
 /**
- * Pins the exported schema-2 document: its exact keys, its exact key order at every level, its
- * exact shape while logged out, its size ceiling, and the absence of anything the plugin is not
- * allowed to export.
+ * Pins the exported schema-2 document: its exact keys, its key order at every level, its shape while
+ * logged out, its size ceiling, and the absence of anything outside the schema.
  *
- * <p>This class also owns the two canonical documents. {@link #populatedFixture()} and
- * {@link #loggedOutFixture()} are the single definition of what schema 2 looks like;
- * {@code TelemetrySchemaFixtureTest} checks that the committed fixture files and the README
- * example agree with them, so the schema exists in exactly one place.
- *
- * <p>Needs no account, credential, network service, Facette installation, or game session.
+ * {@link #populatedFixture()} and {@link #loggedOutFixture()} are the single definition of what
+ * schema 2 looks like, and {@code TelemetrySchemaFixtureTest} checks the committed files against
+ * them, so the schema exists in one place.
  */
 public class TelemetrySnapshotTest
 {
@@ -102,12 +98,10 @@ public class TelemetrySnapshotTest
 	// --- the canonical documents ------------------------------------------------------------
 
 	/**
-	 * The populated canonical document: every exported field present, all eleven equipment slots
-	 * and all twenty-eight inventory slots, both the occupied and the empty item shape, a target,
-	 * active prayers, and session experience in more than one skill.
-	 *
-	 * <p>Every value is obviously synthetic. No real account, character, item, NPC, or filesystem
-	 * path appears, and nothing here is copied game artwork or promotional material.
+	 * The populated canonical document: every exported field present, both the occupied and the
+	 * empty item shape, a target, active prayers, and session experience in more than one skill.
+	 * Every value is obviously synthetic, and no real account, character, item, NPC, filesystem
+	 * path, or copied game material appears.
 	 */
 	static TelemetrySnapshot populatedFixture()
 	{
@@ -720,13 +714,8 @@ public class TelemetrySnapshotTest
 	}
 
 	/**
-	 * Identity and occupancy are decided from the numeric item id and quantity alone.
-	 *
-	 * <p>A game update can recase, respell, or rename an item at any time, and a display name is
-	 * therefore not something identity may rest on. This pins that it does not: the same id with
-	 * four different names — including none at all, and including the cache's own absent-name
-	 * sentinel — is the same item in the same occupied slot, and only the presentation field
-	 * differs. The same holds for an NPC target, which is identified by its id.
+	 * A game update can recase, respell, or rename an item at any time, so identity must rest on the
+	 * numeric id rather than the display name. The same holds for an NPC target.
 	 */
 	@Test
 	public void identityAndOccupancyNeverDependOnADisplayName()
@@ -749,7 +738,7 @@ public class TelemetrySnapshotTest
 		assertEquals(null, sameItem.get(3).getName());
 
 		// The cache's absent-name sentinel is the one name reduced to none, and even that leaves
-		// identity and occupancy untouched — including for item identity zero.
+		// identity and occupancy untouched, including for item identity zero.
 		TelemetryItemSlot absentName = TelemetryItemSlot.of(0, 5, "null");
 		assertTrue(absentName.isOccupied());
 		assertEquals(Integer.valueOf(0), absentName.getItemId());
@@ -761,11 +750,8 @@ public class TelemetrySnapshotTest
 	}
 
 	/**
-	 * Item identity zero is a real item, not an absence.
-	 *
-	 * <p>The client signals an empty slot with a <em>negative</em> identity, and zero is a genuine
-	 * entry in the game's item enumeration. Treating it as absent reported a held item as an empty
-	 * slot and silently undercounted occupancy.
+	 * The client signals an empty slot with a negative identity, and zero is a genuine entry in the
+	 * game's item enumeration. Treating it as absent undercounted occupancy.
 	 */
 	@Test
 	public void itemIdentityZeroIsOccupiedRatherThanEmpty()
@@ -804,7 +790,6 @@ public class TelemetrySnapshotTest
 		}
 	}
 
-	/** Identity zero has to survive serialization as a number, not become a null. */
 	@Test
 	public void itemIdentityZeroSerializesAsAnOccupiedSlot()
 	{
@@ -963,10 +948,9 @@ public class TelemetrySnapshotTest
 	}
 
 	/**
-	 * Collects the object keys of a JSON document by nesting depth, in document order.
-	 * Deliberately hand-written so this test depends on nothing the plugin itself uses to
-	 * serialize. Array brackets do not change depth, so the entries of an array of objects are
-	 * counted at the depth of the objects themselves.
+	 * Hand-written so this test depends on nothing the plugin uses to serialize. Array brackets do
+	 * not change depth, so the entries of an array of objects are counted at the depth of the
+	 * objects themselves.
 	 */
 	private static Map<Integer, List<String>> keysByDepth(String json)
 	{
