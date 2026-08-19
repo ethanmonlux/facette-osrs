@@ -45,7 +45,7 @@ the game's own enumeration order.
 
 | Field | Type | Bound | Meaning |
 |---|---|---|---|
-| `session.pluginActive` | boolean | n/a | Whether the plugin is running. `false` only in the final snapshot written as the plugin is disabled or the client shuts down. |
+| `session.pluginActive` | boolean | n/a | Whether the plugin is running. `false` only in the final snapshot queued as the plugin is disabled or the client shuts down. That snapshot is best-effort and is not guaranteed to be written; see [Session boundaries](#session-boundaries). |
 | `session.gameState` | string | 32 chars | The RuneLite game-state name, for example `LOGGED_IN`, `LOGIN_SCREEN`, `LOGGING_IN`, `HOPPING`. |
 | `session.loggedIn` | boolean | n/a | Whether this snapshot carries valid live player data. Not a copy of `gameState`; see [Logged-in completeness](#logged-in-completeness). |
 | `session.world` | integer or null | n/a | World number. |
@@ -215,7 +215,7 @@ and an empty array is not `null`.
 | Logout | Every player-derived value is nulled in one atomic transition, and the session's comparison points and accumulated gains are discarded, so a later login cannot inherit them. |
 | World hop | The session survives. Player-derived values are nulled while the client is between states and re-read on the next live sample, but `xp.skills`, the latest-gain fields, and `trackingStartedAt` are kept. |
 | Enabling mid-session | Comparison points are seeded from the client's current totals, so the next real gain is exported rather than consumed. `trackingStartedAt` is that moment, not the login. |
-| Disable or shutdown | One final snapshot is written with `pluginActive: false`, `loggedIn: false`, and every gameplay-derived field `null`. Nothing is written afterwards. |
+| Disable or shutdown | One final snapshot is queued with `pluginActive: false`, `loggedIn: false`, and every gameplay-derived field `null`. Nothing is written afterwards. That write is asynchronous and best-effort: it is handed to the plugin's own publisher thread so the client is never made to wait on the filesystem, and that thread is a daemon, so during an orderly client exit the JVM may terminate before the write completes and the file is left at its last active snapshot. Do not treat an inactive snapshot as guaranteed; fall back to the staleness rule in [Publication and freshness](#publication-and-freshness). |
 | Client killed | No final snapshot is written. The file stays as it was and goes stale. |
 
 Every login passes through the `LOGGING_IN` game state, which is what distinguishes a genuine
@@ -227,6 +227,10 @@ The plugin resamples each game tick and republishes when something changed, at m
 second. An unchanged snapshot is republished at least every two seconds as a heartbeat, measured
 against a monotonic clock so a system clock adjustment does not suspend it. A reader can treat a
 file whose `emittedAt` has not advanced in appreciably more than two seconds as stale.
+
+That staleness rule is also how a reader learns the plugin has stopped. The final inactive snapshot
+is best-effort and may never be written — see [Session boundaries](#session-boundaries) — so a reader
+must not wait for `pluginActive: false` before concluding that a file is no longer live.
 
 Each publication is written to a temporary file and then moved over the target, so **a reader that
 opens the target sees either the previous snapshot or the new one, never a partial document.** No
