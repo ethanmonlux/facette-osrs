@@ -92,8 +92,6 @@ public class FacetteTelemetryPlugin extends Plugin
 
 	private static final String DATA_SUBDIRECTORY = "facette";
 
-	private static final long SHUTDOWN_TIMEOUT_SECONDS = 5L;
-
 	// Matched positionally to the slot names schema 2 declares. RuneLite's enumeration also carries
 	// the player model's arms, hair, and jaw, which never hold an item.
 	private static final EquipmentInventorySlot[] EXPORTED_EQUIPMENT_SLOTS = {
@@ -217,7 +215,8 @@ public class FacetteTelemetryPlugin extends Plugin
 		if (!run.attachPublisherIfCurrent(executor))
 		{
 			// Shutdown already ran and found no publisher, so nothing else would dispose of this.
-			executor.shutdownNow();
+			// Nothing has been scheduled on it yet, so a graceful shutdown ends it outright.
+			executor.shutdown();
 			log.debug("Run was retired during startup; publisher discarded");
 			return;
 		}
@@ -259,19 +258,18 @@ public class FacetteTelemetryPlugin extends Plugin
 			return;
 		}
 
-		// The final write reports the plugin as inactive and carries no gameplay data. It is queued
-		// on the run's own publisher thread because this one may be the client thread.
-		run.submitFinalWrite(() -> publish(run, false));
-
-		if (run.awaitPublisherTermination(SHUTDOWN_TIMEOUT_SECONDS, TimeUnit.SECONDS))
+		// The final write reports the plugin as inactive and carries no gameplay data. It is queued on
+		// the run's own publisher thread and completes there, unwaited for: this thread may be the
+		// client thread, and disabling a plugin must not wait on a filesystem operation.
+		if (run.submitFinalWrite(() -> publish(run, false)))
 		{
-			log.debug("Facette Telemetry stopped");
+			// It commits only if it still holds authority when it gets there, so a re-enable that
+			// beats it to the file leaves it nothing to do.
+			log.debug("Facette Telemetry stopped; a final snapshot is queued on its publisher");
 			return;
 		}
 
-		// The write continues on a daemon thread and commits only if it still holds authority.
-		log.warn("Final telemetry snapshot did not complete within {}s; continuing off-thread. "
-			+ "It will be abandoned if the plugin is re-enabled first.", SHUTDOWN_TIMEOUT_SECONDS);
+		log.debug("Facette Telemetry stopped; its publisher had already stopped, so no final snapshot");
 	}
 
 	/**

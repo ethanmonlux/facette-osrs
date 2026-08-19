@@ -29,7 +29,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.Collections;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
@@ -51,8 +51,12 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockingDetails;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
+import org.mockito.invocation.Invocation;
 import net.runelite.api.Client;
 import net.runelite.api.EnumComposition;
 import net.runelite.api.EnumID;
@@ -111,6 +115,13 @@ public class FacetteTelemetryPluginLifecycleTest
 	 * this is how an unchecked failure is delivered to the one place that must contain it.
 	 */
 	private boolean wallClockFails;
+
+	/**
+	 * Run once, inside the executor supplier, before the plugin is handed its publisher. It is how a
+	 * disable is landed in the window between startup deciding the run is live and the run adopting
+	 * the executor.
+	 */
+	private Runnable beforePublisherHandOver;
 	private AtomicInteger instanceCounter;
 	private Path dataDirectory;
 	private FacetteTelemetryPlugin plugin;
@@ -171,16 +182,15 @@ public class FacetteTelemetryPluginLifecycleTest
 			() -> dataDirectory,
 			() ->
 			{
-				try
+				if (beforePublisherHandOver != null)
 				{
-					ControlledPublisher publisher = new ControlledPublisher();
-					executors.add(publisher);
-					return publisher.service;
+					Runnable hook = beforePublisherHandOver;
+					beforePublisherHandOver = null;
+					hook.run();
 				}
-				catch (InterruptedException e)
-				{
-					throw new IllegalStateException(e);
-				}
+				ControlledPublisher publisher = new ControlledPublisher();
+				executors.add(publisher);
+				return publisher.service;
 			});
 		plugin.client = client;
 		plugin.clientThread = clientThread;
@@ -456,6 +466,74 @@ public class FacetteTelemetryPluginLifecycleTest
 		assertTrue(executors.isEmpty());
 	}
 
+	/**
+	 * The narrow window between startup deciding the run is live and the run adopting the executor. A
+	 * disable landing inside it leaves an executor no run owns, so the startup path has to dispose of
+	 * it, and it does so gracefully: nothing has been scheduled on it, and forcing an executor down is
+	 * an interrupting call this plugin does not make.
+	 */
+	@Test
+	public void anExecutorARetiredRunRefusesToAdoptIsShutDownGracefully()
+	{
+		logInClient();
+		plugin.startUp();
+
+		// The disable lands between sampling and adoption, which is the only route to the refusal.
+		beforePublisherHandOver = plugin::shutDown;
+		runClientThreadQueue();
+
+		ControlledPublisher refused = onlyExecutor();
+		assertTrue("a refused executor must not be left live", refused.isShutdown());
+		assertFalse("nothing may be scheduled on a refused executor", refused.hasScheduledTask());
+		assertOnlyNonInterruptingExecutorCalls(refused.service);
+		assertFalse("a run that never adopted a publisher writes no snapshot", snapshotExists());
+	}
+
+	/**
+	 * Nothing in this plugin interrupts a thread. Disabling cancels the periodic task in the form that
+	 * leaves a publication already running alone, and shuts the publisher down in the form that lets
+	 * queued work finish. Asserted against the executor and the task handle the plugin was actually
+	 * given: the cancellation is the only thing ever asked of the handle, and every call made on the
+	 * executor is one of the permitted non-interrupting ones.
+	 */
+	@Test
+	public void disablingStopsThePublisherWithoutInterruptingAnything() throws IOException
+	{
+		logInClient();
+		plugin.startUp();
+		runClientThreadQueue();
+		ControlledPublisher executor = onlyExecutor();
+		executor.runScheduledTaskOnce();
+
+		plugin.shutDown();
+
+		verify(executor.scheduledTaskHandle).cancel(false);
+		verifyNoMoreInteractions(executor.scheduledTaskHandle);
+		verify(executor.service).shutdown();
+		assertOnlyNonInterruptingExecutorCalls(executor.service);
+
+		// The graceful stop is the one that leaves the queued write able to run.
+		executor.runQueuedWork();
+		assertEquals("the final inactive snapshot still lands", "false",
+			value(snapshotOnDisk(), "pluginActive"));
+	}
+
+	/**
+	 * The publisher is driven through these calls and no others. Forcing an executor down, or
+	 * cancelling work in the form that interrupts it, is outside the set, and neither has any place
+	 * in a plugin that must not interrupt threads it does not own.
+	 */
+	private static void assertOnlyNonInterruptingExecutorCalls(ScheduledExecutorService service)
+	{
+		List<String> permitted = Arrays.asList(
+			"scheduleWithFixedDelay", "execute", "shutdown", "isShutdown");
+		for (Invocation invocation : mockingDetails(service).getInvocations())
+		{
+			String called = invocation.getMethod().getName();
+			assertTrue("the plugin called " + called + " on its publisher", permitted.contains(called));
+		}
+	}
+
 	// --- 6. startup while logged in --------------------------------------------------------
 
 	@Test
@@ -674,15 +752,16 @@ public class FacetteTelemetryPluginLifecycleTest
 		plugin.shutDown();
 	}
 
-	// --- 10. bounded shutdown ----------------------------------------------------------------
+	// --- 10. shutdown hands the final write over and returns ---------------------------------
 
 	/**
-	 * On the real client this runs on the client thread, where a stalled filesystem must not be
-	 * able to hold the caller. The final write is queued on the run's own publisher instead, so
-	 * the caller returns whether or not the write has finished.
+	 * On the real client this runs on the client thread, which is never made to wait on a filesystem
+	 * operation. The final write is handed to the run's own publisher and the caller returns, so this
+	 * publisher deliberately runs nothing of its own: the whole test proceeds with the write still
+	 * sitting in its queue, which is only possible because nothing waits for it.
 	 */
 	@Test
-	public void shutdownQueuesTheFinalWriteAndDoesNotPerformItOnTheCallerThread() throws IOException
+	public void shutdownQueuesTheFinalWriteAndReturnsWithoutWaitingForIt() throws IOException
 	{
 		logInClient();
 		plugin.startUp();
@@ -691,31 +770,33 @@ public class FacetteTelemetryPluginLifecycleTest
 		executor.runScheduledTaskOnce();
 		String beforeShutdown = snapshotOnDisk();
 
-		// The executor refuses to run anything during the wait, standing in for a write that
-		// outlives the bound.
-		executor.runQueuedWorkOnAwait = false;
 		plugin.shutDown();
 
 		assertEquals("the caller must not have written the final snapshot itself",
 			beforeShutdown, snapshotOnDisk());
 		assertTrue("the final write must have been queued on the publisher", executor.hasQueuedWork());
+		assertTrue("the publisher must accept nothing further", executor.isShutdown());
 
-		// When it finally runs, it lands the inactive snapshot.
+		// When the publisher gets to it, it lands the inactive snapshot.
 		executor.runQueuedWork();
 		String json = snapshotOnDisk();
 		assertEquals("false", value(json, "pluginActive"));
 		assertEquals("false", value(json, "loggedIn"));
 	}
 
+	/** What that queued write puts on disk once the publisher runs it. */
 	@Test
-	public void anOrderlyShutdownWritesTheInactiveSnapshotWithinTheBound() throws IOException
+	public void theQueuedFinalWriteReportsThePluginInactiveAndCarriesNoGameplayData()
+		throws IOException
 	{
 		logInClient();
 		plugin.startUp();
 		runClientThreadQueue();
-		onlyExecutor().runScheduledTaskOnce();
+		ControlledPublisher executor = onlyExecutor();
+		executor.runScheduledTaskOnce();
 
 		plugin.shutDown();
+		executor.runQueuedWork();
 
 		String json = snapshotOnDisk();
 		assertEquals("false", value(json, "pluginActive"));
@@ -737,8 +818,7 @@ public class FacetteTelemetryPluginLifecycleTest
 		ControlledPublisher first = onlyExecutor();
 		first.runScheduledTaskOnce();
 
-		// Disable, with the final write left stalled on the old publisher.
-		first.runQueuedWorkOnAwait = false;
+		// Disable, with the final write left sitting on the old publisher.
 		plugin.shutDown();
 		assertTrue(first.hasQueuedWork());
 
@@ -1358,15 +1438,15 @@ public class FacetteTelemetryPluginLifecycleTest
 		private final ScheduledExecutorService service = mock(ScheduledExecutorService.class);
 		private final List<Runnable> queued = new ArrayList<>();
 		private Runnable scheduledTask;
+
+		/** The handle the plugin was given for the periodic task, so its cancellation is checkable. */
+		private ScheduledFuture<?> scheduledTaskHandle;
 		private boolean shutdown;
 
 		/** True when the run adopted this executor before scheduling anything on it. */
 		private boolean adoptedBeforeScheduling;
 
-		/** Whether a bounded wait drains the queue, or stands in for a write that outlives it. */
-		private boolean runQueuedWorkOnAwait = true;
-
-		private ControlledPublisher() throws InterruptedException
+		private ControlledPublisher()
 		{
 			when(service.scheduleWithFixedDelay(any(Runnable.class), anyLong(), anyLong(),
 				any(TimeUnit.class))).thenAnswer(invocation ->
@@ -1375,7 +1455,8 @@ public class FacetteTelemetryPluginLifecycleTest
 				// plugin adopts before it schedules. That ordering is the assertion.
 				adoptedBeforeScheduling = true;
 				scheduledTask = invocation.getArgument(0);
-				return mock(ScheduledFuture.class);
+				scheduledTaskHandle = mock(ScheduledFuture.class);
+				return scheduledTaskHandle;
 			});
 			doAnswer(invocation ->
 			{
@@ -1391,24 +1472,9 @@ public class FacetteTelemetryPluginLifecycleTest
 				shutdown = true;
 				return null;
 			}).when(service).shutdown();
-			doAnswer(invocation ->
-			{
-				shutdown = true;
-				queued.clear();
-				scheduledTask = null;
-				return Collections.emptyList();
-			}).when(service).shutdownNow();
+			// shutdownNow is deliberately left unstubbed. The plugin must never force a publisher
+			// down, and a call here would leave this executor reading as live at test end.
 			when(service.isShutdown()).thenAnswer(invocation -> shutdown);
-			when(service.awaitTermination(anyLong(), any(TimeUnit.class))).thenAnswer(invocation ->
-			{
-				if (!runQueuedWorkOnAwait)
-				{
-					// Stands in for a write still running when the bound expires.
-					return false;
-				}
-				runQueuedWork();
-				return true;
-			});
 		}
 
 		private boolean hasScheduledTask()

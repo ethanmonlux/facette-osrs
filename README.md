@@ -79,10 +79,17 @@ stale file. The file is replaced whole each time, so a reader never sees a half-
 ## Stopping the export and removing the data
 
 To stop the export, **disable the Facette Companion plugin** in RuneLite's plugin list. The plugin
-writes one final snapshot on the way out, reporting `pluginActive: false`, `loggedIn: false`, and
-every gameplay-derived field `null`, and then writes nothing further. If RuneLite is killed rather
-than closed, no final snapshot is written and the file goes stale. It does not report an orderly
-shutdown that did not happen.
+queues one final snapshot on the way out, reporting `pluginActive: false`, `loggedIn: false`, and
+every gameplay-derived field `null`, and then writes nothing further.
+
+That final write is asynchronous and best-effort. It is handed to the plugin's own publisher thread
+so that disabling the plugin never makes the client wait on the filesystem, and that thread is a
+daemon, so it cannot hold the client open. If you are closing RuneLite rather than only disabling
+the plugin, the client can therefore exit before the write happens, leaving the file at its last
+active snapshot. If RuneLite is killed, no final snapshot is written either. In every one of those
+cases the file simply stops being updated, so treat it as stale once `emittedAt` stops advancing
+rather than waiting for an inactive snapshot that may never arrive. What the plugin never does is
+report an orderly shutdown that did not happen.
 
 To remove the exported data, delete the directory:
 

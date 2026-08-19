@@ -28,7 +28,6 @@ import java.util.Objects;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -147,9 +146,10 @@ final class PublisherRunContext
 	}
 
 	/**
-	 * Stops periodic publication and queues the final write on the run's own publisher thread. A
-	 * stalled filesystem cannot hold up whoever is disabling the plugin, and the final write queues
-	 * behind any publication already in flight instead of racing it.
+	 * Stops periodic publication and queues the final write on the run's own publisher thread. Nothing
+	 * waits for it: whoever is disabling the plugin returns immediately, the write queues behind any
+	 * publication already in flight instead of racing it, and it commits only if it still holds
+	 * authority by the time it gets there.
 	 */
 	synchronized boolean submitFinalWrite(Runnable finalWrite)
 	{
@@ -177,33 +177,14 @@ final class PublisherRunContext
 	}
 
 	/**
-	 * Waits a bounded time for the publisher to finish. False means the write is still running, and it
-	 * will commit only if it still holds authority when it gets there.
+	 * Stops the publisher without a final write, for a run being abandoned. Nothing is ever queued on
+	 * an abandoned publisher, so the only work it can be holding is the periodic task, cancelled just
+	 * above and dropped by the executor on shutdown. A graceful shutdown therefore discards as much as
+	 * a forcing one would, and differs only in leaving a publication that is already executing to
+	 * finish: the writer stages through a temporary file, and cutting a filesystem operation short
+	 * risks leaving that behind. The publisher thread is a daemon and the run is retired before this
+	 * is called, so whatever finishes cannot hold the client open and cannot commit over a newer run.
 	 */
-	boolean awaitPublisherTermination(long timeout, TimeUnit unit)
-	{
-		ExecutorService toAwait;
-		synchronized (this)
-		{
-			toAwait = executor;
-		}
-		if (toAwait == null)
-		{
-			return true;
-		}
-		try
-		{
-			// Awaited outside the monitor so a slow write cannot block a thread that only reads.
-			return toAwait.awaitTermination(timeout, unit);
-		}
-		catch (InterruptedException e)
-		{
-			Thread.currentThread().interrupt();
-			return false;
-		}
-	}
-
-	// Stops the publisher without a final write, for a run being abandoned.
 	synchronized void abandonPublisher()
 	{
 		if (publishTask != null)
@@ -213,7 +194,7 @@ final class PublisherRunContext
 		}
 		if (executor != null)
 		{
-			executor.shutdownNow();
+			executor.shutdown();
 			executor = null;
 		}
 	}
