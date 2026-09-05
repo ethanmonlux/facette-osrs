@@ -33,17 +33,23 @@ import java.util.List;
 import java.util.Objects;
 
 /**
- * One immutable schema-2 telemetry snapshot and its canonical JSON form. The schema is closed: every
+ * One immutable schema-3 telemetry snapshot and its canonical JSON form. The schema is closed: every
  * field named here is exported and nothing else is.
  *
  * The JSON is written by hand rather than reflected out of this object, both to fix the key order
  * and because reflection is not permitted in a Plugin Hub plugin. Every collection is fixed-size or
  * enum-bounded and every exported string is bounded, so the document stays under the writer's size
  * limit however long the player plays.
+ *
+ * Schema 3 is schema 2 plus a suffix. Every schema-2 key keeps its name, its position, and its
+ * meaning, and the new groups are appended after them, so a reader written against schema 2 finds
+ * everything it knows exactly where it was. The new groups each answer for themselves in
+ * {@code capabilities}: a group is reported supported only while it is actually carrying values, and
+ * a group that could not be read is null rather than filled in with a default.
  */
 final class TelemetrySnapshot
 {
-	static final int SCHEMA = 2;
+	static final int SCHEMA = 3;
 
 	static final String SOURCE = "runelite";
 
@@ -68,6 +74,16 @@ final class TelemetrySnapshot
 	static final int MAX_ITEM_NAME_CHARS = 48;
 
 	static final int MAX_NPC_NAME_CHARS = 48;
+
+	static final int MAX_ACCOUNT_TYPE_CHARS = 32;
+
+	static final int MAX_OFFER_STATE_CHARS = 24;
+
+	// The schema-3 fact groups, in the order they appear under "capabilities" and in the order the
+	// groups themselves appear in the document. Naming them once here is what stops a group being
+	// exported without a capability entry, or given one it does not have.
+	static final List<String> CAPABILITY_GROUPS = Collections.unmodifiableList(Arrays.asList(
+		"skills", "account", "quests", "slayer", "grandExchange"));
 
 	private final String instanceId;
 	private final long seq;
@@ -103,6 +119,17 @@ final class TelemetrySnapshot
 	private final Long lastChangedAt;
 	private final List<TelemetrySkillGain> skillGains;
 
+	private final List<TelemetrySkillState> skillStates;
+
+	private final Integer accountTypeId;
+
+	private final Integer questPoints;
+
+	private final Integer slayerRemaining;
+	private final Integer slayerTaskCreatureId;
+
+	private final List<TelemetryGrandExchangeSlot> grandExchangeSlots;
+
 	private TelemetrySnapshot(Builder b)
 	{
 		this.instanceId = Objects.requireNonNull(b.instanceId, "instanceId");
@@ -126,6 +153,9 @@ final class TelemetrySnapshot
 		this.freeSlots = b.freeSlots;
 		this.lastSkill = b.lastSkill;
 		this.lastDelta = b.lastDelta;
+		this.accountTypeId = b.accountTypeId;
+		this.questPoints = b.questPoints;
+		this.slayerTaskCreatureId = b.slayerTaskCreatureId;
 
 		if (seq < 0)
 		{
@@ -148,6 +178,8 @@ final class TelemetrySnapshot
 		this.equipmentSlots = copyFixedSlots(b.equipmentSlots, EQUIPMENT_SLOTS.size(), "equipment");
 		this.inventorySlots = copyFixedSlots(b.inventorySlots, INVENTORY_SLOTS, "inventory");
 		this.skillGains = copySkillGains(b.skillGains, emittedAt);
+		this.skillStates = copyOrNull(b.skillStates, "skill state");
+		this.grandExchangeSlots = copyOrNull(b.grandExchangeSlots, "grand exchange slot");
 
 		if (usedSlots != null || freeSlots != null)
 		{
@@ -157,6 +189,15 @@ final class TelemetrySnapshot
 					"used and free inventory slots must be reported together and sum to "
 						+ INVENTORY_SLOTS);
 			}
+		}
+
+		// A task creature without a remaining count would be a task nobody can say is still
+		// assigned, so the identifier is only carried by a slayer group that has its count.
+		this.slayerRemaining = b.slayerRemaining;
+		if (slayerRemaining == null && slayerTaskCreatureId != null)
+		{
+			throw new IllegalArgumentException(
+				"a slayer task creature cannot be reported without a remaining count");
 		}
 	}
 
@@ -246,10 +287,76 @@ final class TelemetrySnapshot
 		num(sb, "lastChangedAt", lastChangedAt).append(',');
 		key(sb, "skills");
 		appendSkillGains(sb);
+		sb.append("},");
+
+		// Everything from here down is what schema 3 adds. Schema 2's keys above are untouched, so
+		// the difference between the two documents is exactly this suffix.
+		key(sb, "capabilities").append('{');
+		appendCapabilities(sb);
+		sb.append("},");
+
+		key(sb, "skills").append('{');
+		key(sb, "entries");
+		appendSkillStates(sb);
+		sb.append("},");
+
+		key(sb, "account").append('{');
+		str(sb, "type", accountTypeName(), MAX_ACCOUNT_TYPE_CHARS).append(',');
+		num(sb, "typeId", accountTypeId);
+		sb.append("},");
+
+		key(sb, "quests").append('{');
+		num(sb, "points", questPoints);
+		sb.append("},");
+
+		key(sb, "slayer").append('{');
+		num(sb, "remaining", slayerRemaining).append(',');
+		num(sb, "taskCreatureId", slayerTaskCreatureId);
+		sb.append("},");
+
+		key(sb, "grandExchange").append('{');
+		key(sb, "slots");
+		appendGrandExchangeSlots(sb);
 		sb.append('}');
 
 		sb.append('}');
 		return sb.toString();
+	}
+
+	/**
+	 * The name for the exported account mode, or null when this build has no name for the reading.
+	 * Derived rather than stored, so the name and the identifier beside it cannot disagree.
+	 */
+	private String accountTypeName()
+	{
+		return accountTypeId == null ? null : TelemetryAccountType.nameOf(accountTypeId);
+	}
+
+	/**
+	 * Whether one schema-3 group is carrying values. This is the single definition of supported, and
+	 * every group's answer is read off the same fields the serializer is about to write, so a
+	 * capability cannot claim something the document does not contain.
+	 */
+	TelemetryCapability capability(String group)
+	{
+		switch (group)
+		{
+			case "skills":
+				return TelemetryCapability.of(skillStates != null);
+			case "account":
+				// The identifier, not the name: an account mode this build cannot name is still a
+				// mode the client reported, and reporting it unavailable would lose that.
+				return TelemetryCapability.of(accountTypeId != null);
+			case "quests":
+				return TelemetryCapability.of(questPoints != null);
+			case "slayer":
+				// The count, not the creature: having no task assigned is a supported answer.
+				return TelemetryCapability.of(slayerRemaining != null);
+			case "grandExchange":
+				return TelemetryCapability.of(grandExchangeSlots != null);
+			default:
+				throw new IllegalArgumentException("no such capability group: " + group);
+		}
 	}
 
 	byte[] toJsonBytes()
@@ -368,6 +475,74 @@ final class TelemetrySnapshot
 		return sb.append(']');
 	}
 
+	private StringBuilder appendCapabilities(StringBuilder sb)
+	{
+		for (int i = 0; i < CAPABILITY_GROUPS.size(); i++)
+		{
+			if (i > 0)
+			{
+				sb.append(',');
+			}
+			String group = CAPABILITY_GROUPS.get(i);
+			String state = capability(group).exported();
+			str(sb, group, state, state.length());
+		}
+		return sb;
+	}
+
+	private StringBuilder appendSkillStates(StringBuilder sb)
+	{
+		if (skillStates == null)
+		{
+			return sb.append("null");
+		}
+		sb.append('[');
+		for (int i = 0; i < skillStates.size(); i++)
+		{
+			if (i > 0)
+			{
+				sb.append(',');
+			}
+			TelemetrySkillState skill = skillStates.get(i);
+			sb.append('{');
+			str(sb, "skill", skill.getSkill(), MAX_SKILL_CHARS).append(',');
+			num(sb, "level", skill.getLevel()).append(',');
+			num(sb, "boostedLevel", skill.getBoostedLevel()).append(',');
+			num(sb, "xp", skill.getXp());
+			sb.append('}');
+		}
+		return sb.append(']');
+	}
+
+	private StringBuilder appendGrandExchangeSlots(StringBuilder sb)
+	{
+		if (grandExchangeSlots == null)
+		{
+			return sb.append("null");
+		}
+		sb.append('[');
+		for (int i = 0; i < grandExchangeSlots.size(); i++)
+		{
+			if (i > 0)
+			{
+				sb.append(',');
+			}
+			TelemetryGrandExchangeSlot offer = grandExchangeSlots.get(i);
+			sb.append('{');
+			// The position is written from the loop, not from the entry, so a slot number cannot
+			// disagree with where it sits.
+			num(sb, "slot", i).append(',');
+			str(sb, "state", offer.getState(), MAX_OFFER_STATE_CHARS).append(',');
+			num(sb, "itemId", offer.getItemId()).append(',');
+			num(sb, "price", offer.getPrice()).append(',');
+			num(sb, "totalQuantity", offer.getTotalQuantity()).append(',');
+			num(sb, "quantityTransacted", offer.getQuantityTransacted()).append(',');
+			num(sb, "spent", offer.getSpent());
+			sb.append('}');
+		}
+		return sb.append(']');
+	}
+
 	private static StringBuilder key(StringBuilder sb, String k)
 	{
 		appendString(sb, k, k.length());
@@ -476,6 +651,25 @@ final class TelemetrySnapshot
 		return Collections.unmodifiableList(copy);
 	}
 
+	/**
+	 * A defensive copy of a group whose length is bounded by the client's own enumeration rather
+	 * than by a fixed number this file could assert. Null stays null, because "the group was not
+	 * read" and "the group is empty" are different answers and only one of them is a capability.
+	 */
+	private static <T> List<T> copyOrNull(List<T> values, String what)
+	{
+		if (values == null)
+		{
+			return null;
+		}
+		List<T> copy = new ArrayList<>(values.size());
+		for (T value : values)
+		{
+			copy.add(Objects.requireNonNull(value, what));
+		}
+		return Collections.unmodifiableList(copy);
+	}
+
 	private static List<TelemetrySkillGain> copySkillGains(List<TelemetrySkillGain> gains,
 		long emittedAt)
 	{
@@ -524,6 +718,12 @@ final class TelemetrySnapshot
 		private Integer lastDelta;
 		private Long lastChangedAt;
 		private List<TelemetrySkillGain> skillGains;
+		private List<TelemetrySkillState> skillStates;
+		private Integer accountTypeId;
+		private Integer questPoints;
+		private Integer slayerRemaining;
+		private Integer slayerTaskCreatureId;
+		private List<TelemetryGrandExchangeSlot> grandExchangeSlots;
 
 		private Builder()
 		{
@@ -592,6 +792,40 @@ final class TelemetrySnapshot
 			this.lastDelta = lastDelta;
 			this.lastChangedAt = lastChangedAt;
 			this.skillGains = skills;
+			return this;
+		}
+
+		/** Null for the whole group when no live sample has read the client's skill totals. */
+		Builder skills(List<TelemetrySkillState> states)
+		{
+			this.skillStates = states;
+			return this;
+		}
+
+		/** The account mode's own reading. The name is derived from it at serialization time. */
+		Builder account(Integer typeId)
+		{
+			this.accountTypeId = typeId;
+			return this;
+		}
+
+		Builder quests(Integer points)
+		{
+			this.questPoints = points;
+			return this;
+		}
+
+		/** A null creature identifier with a remaining count is "no task assigned". */
+		Builder slayer(Integer remaining, Integer taskCreatureId)
+		{
+			this.slayerRemaining = remaining;
+			this.slayerTaskCreatureId = taskCreatureId;
+			return this;
+		}
+
+		Builder grandExchange(List<TelemetryGrandExchangeSlot> slots)
+		{
+			this.grandExchangeSlots = slots;
 			return this;
 		}
 

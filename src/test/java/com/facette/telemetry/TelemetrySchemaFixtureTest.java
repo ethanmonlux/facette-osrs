@@ -42,7 +42,7 @@ import static org.junit.Assert.fail;
 import org.junit.Test;
 
 /**
- * Holds the committed schema-2 fixtures and the serializer to the same contract. The fixtures are
+ * Holds the committed schema-3 fixtures and the serializer to the same contract. The fixtures are
  * the cross-repository consumer contract: the Facette adapter commits the same bytes, so if the
  * serializer changes shape without them, the contract has silently forked and this says so.
  *
@@ -52,10 +52,10 @@ import org.junit.Test;
  */
 public class TelemetrySchemaFixtureTest
 {
-	private static final String POPULATED_FIXTURE = "src/test/resources/facette-osrs-state-v2.json";
+	private static final String POPULATED_FIXTURE = "src/test/resources/facette-osrs-state-v3.json";
 
 	private static final String LOGGED_OUT_FIXTURE =
-		"src/test/resources/facette-osrs-state-v2-logged-out.json";
+		"src/test/resources/facette-osrs-state-v3-logged-out.json";
 
 	private static final String MANIFEST = "runelite-plugin.properties";
 
@@ -63,7 +63,7 @@ public class TelemetrySchemaFixtureTest
 	public void theCommittedPopulatedFixtureIsExactlyWhatTheSerializerProduces() throws IOException
 	{
 		assertArrayEquals(
-			"src/test/resources/facette-osrs-state-v2.json no longer matches the serializer",
+			"src/test/resources/facette-osrs-state-v3.json no longer matches the serializer",
 			TelemetrySnapshotTest.populatedFixture().toJsonBytes(),
 			readProjectFile(POPULATED_FIXTURE));
 	}
@@ -72,7 +72,7 @@ public class TelemetrySchemaFixtureTest
 	public void theCommittedLoggedOutFixtureIsExactlyWhatTheSerializerProduces() throws IOException
 	{
 		assertArrayEquals(
-			"src/test/resources/facette-osrs-state-v2-logged-out.json no longer matches the"
+			"src/test/resources/facette-osrs-state-v3-logged-out.json no longer matches the"
 				+ " serializer",
 			TelemetrySnapshotTest.loggedOutFixture().toJsonBytes(),
 			readProjectFile(LOGGED_OUT_FIXTURE));
@@ -86,9 +86,9 @@ public class TelemetrySchemaFixtureTest
 	public void bothFixturesAreOnTheTestClasspathUnchanged() throws IOException
 	{
 		assertArrayEquals(readProjectFile(POPULATED_FIXTURE),
-			readResource("/facette-osrs-state-v2.json"));
+			readResource("/facette-osrs-state-v3.json"));
 		assertArrayEquals(readProjectFile(LOGGED_OUT_FIXTURE),
-			readResource("/facette-osrs-state-v2-logged-out.json"));
+			readResource("/facette-osrs-state-v3-logged-out.json"));
 	}
 
 	/**
@@ -164,9 +164,10 @@ public class TelemetrySchemaFixtureTest
 	}
 
 	/**
-	 * The fixtures are the consumer contract, so they must not contain any of the things schema 2 is
+	 * The fixtures are the consumer contract, so they must not contain any of the things schema 3 is
 	 * closed against, including a real account name or a filesystem path in a committed file that
-	 * people will read.
+	 * people will read. Schema 3 exports an account's mode, never its identity, so the identity
+	 * markers below stay forbidden exactly as they were.
 	 */
 	@Test
 	public void neitherFixtureContainsIdentityPathOrNetworkContent() throws IOException
@@ -192,7 +193,7 @@ public class TelemetrySchemaFixtureTest
 		assertTrue("logged-out fixture is " + loggedOut + " bytes",
 			loggedOut < TelemetrySnapshotWriter.MAX_SNAPSHOT_BYTES);
 		assertTrue("a fixture that shrank this far is probably no longer the full shape",
-			populated > 2_048);
+			populated > 4_096);
 	}
 
 	@Test

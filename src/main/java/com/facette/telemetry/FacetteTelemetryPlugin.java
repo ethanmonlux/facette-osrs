@@ -49,6 +49,8 @@ import net.runelite.api.EnumComposition;
 import net.runelite.api.EnumID;
 import net.runelite.api.EquipmentInventorySlot;
 import net.runelite.api.GameState;
+import net.runelite.api.GrandExchangeOffer;
+import net.runelite.api.GrandExchangeOfferState;
 import net.runelite.api.Item;
 import net.runelite.api.ItemComposition;
 import net.runelite.api.ItemContainer;
@@ -74,8 +76,12 @@ import net.runelite.client.plugins.PluginDescriptor;
  * Exports a read-only view of the local player's live state to one local JSON file. Nothing flows
  * back: no command channel, no menu action, no synthesized input, and no network request. This class
  * is the only part that touches RuneLite. Client state is sampled on the client thread, where those
- * reads are legal, and publication runs on a separate thread per run. Schema 2 accepts only an NPC
+ * reads are legal, and publication runs on a separate thread per run. Schema 3 accepts only an NPC
  * target, so an interacted-with player is discarded here at the point of reading.
+ *
+ * Every read here is a plain accessor or a variable lookup. Nothing runs a client script, walks the
+ * widget tree, or reads the chat, and the sampling cost of a tick does not grow with how much the
+ * account has done.
  */
 @Slf4j
 @PluginDescriptor(
@@ -92,7 +98,7 @@ public class FacetteTelemetryPlugin extends Plugin
 
 	private static final String DATA_SUBDIRECTORY = "facette";
 
-	// Matched positionally to the slot names schema 2 declares. RuneLite's enumeration also carries
+	// Matched positionally to the slot names schema 3 declares. RuneLite's enumeration also carries
 	// the player model's arms, hair, and jaw, which never hold an item.
 	private static final EquipmentInventorySlot[] EXPORTED_EQUIPMENT_SLOTS = {
 		EquipmentInventorySlot.HEAD,
@@ -114,6 +120,13 @@ public class FacetteTelemetryPlugin extends Plugin
 
 	// The style name the game's own data uses to mean "this weapon has no style in this position".
 	private static final String NO_ATTACK_STYLE = "other";
+
+	// The client's aggregate-experience sentinel, which is not a trainable skill.
+	private static final String OVERALL_SKILL_NAME = "OVERALL";
+
+	// Every skill starts at level one, so a base level below this is the client's own uninitialized
+	// reading rather than a level anyone has.
+	private static final int MIN_REAL_SKILL_LEVEL = 1;
 
 	@Inject
 	Client client;
@@ -387,6 +400,103 @@ public class FacetteTelemetryPlugin extends Plugin
 		state.updateInventory(readInventorySlots());
 
 		state.markPlayerStateComplete();
+
+		// Schema 3, read after the completeness mark on purpose. These groups answer for themselves
+		// through the document's capabilities, so one of them failing to read leaves the rest of the
+		// snapshot valid instead of nulling a player's whole document.
+		state.updateSkillStates(readSkillStates());
+		state.updateAccountType(client.getVarbitValue(VarbitID.IRONMAN));
+		state.updateQuestPoints(client.getVarpValue(VarPlayerID.QP));
+		state.updateSlayerTask(
+			client.getVarpValue(VarPlayerID.SLAYER_COUNT),
+			client.getVarpValue(VarPlayerID.SLAYER_TARGET));
+		state.updateGrandExchange(readGrandExchangeSlots());
+	}
+
+	/**
+	 * Every skill the client's own enumeration defines, in its order: the base level, the boosted or
+	 * drained level, and the lifetime experience. Bounded by the enumeration, so a client that adds a
+	 * skill grows this list by one entry and nothing else changes.
+	 */
+	private List<TelemetrySkillState> readSkillStates()
+	{
+		List<TelemetrySkillState> states = new ArrayList<>(Skill.values().length);
+		for (Skill skill : Skill.values())
+		{
+			// The same guard the experience baselines use. The aggregate sentinel is not a
+			// trainable skill, and its experience is the account's total rather than a skill's,
+			// which is not a fact this schema exports.
+			if (skill == null || OVERALL_SKILL_NAME.equals(skill.name()))
+			{
+				continue;
+			}
+			int level = client.getRealSkillLevel(skill);
+			int boostedLevel = client.getBoostedSkillLevel(skill);
+			int xp = client.getSkillExperience(skill);
+			if (level < MIN_REAL_SKILL_LEVEL || boostedLevel < 0 || xp < 0)
+			{
+				// One unreadable skill makes the whole group unavailable rather than exporting a
+				// list that looks complete while a skill silently reads as level zero.
+				//
+				// Zero is the reason the base level is checked against one rather than against
+				// zero. Every skill starts at level one, so a base level of zero is not a low
+				// reading, it is the client's arrays before they were filled in — the same
+				// initialization window the experience baselines already refuse to seed from. A
+				// boosted level of zero is real (a drained skill), and so is zero experience (an
+				// untrained one), so neither of those is treated the same way.
+				return null;
+			}
+			states.add(new TelemetrySkillState(
+				skill.name().toLowerCase(Locale.ROOT), level, boostedLevel, xp));
+		}
+		return states;
+	}
+
+	/**
+	 * The player's own Grand Exchange slots, as the client currently holds them. One entry per slot
+	 * the client exposes, in its own order, so the list is bounded by the client rather than by a
+	 * number assumed here. Nothing is looked up about any item beyond what the offer itself says: no
+	 * price guide, no market history, and no valuation.
+	 */
+	private List<TelemetryGrandExchangeSlot> readGrandExchangeSlots()
+	{
+		GrandExchangeOffer[] offers = client.getGrandExchangeOffers();
+		if (offers == null)
+		{
+			return null;
+		}
+		List<TelemetryGrandExchangeSlot> slots = new ArrayList<>(offers.length);
+		for (GrandExchangeOffer offer : offers)
+		{
+			slots.add(readGrandExchangeSlot(offer));
+		}
+		return slots;
+	}
+
+	private static TelemetryGrandExchangeSlot readGrandExchangeSlot(GrandExchangeOffer offer)
+	{
+		if (offer == null)
+		{
+			return TelemetryGrandExchangeSlot.UNAVAILABLE;
+		}
+		GrandExchangeOfferState state = offer.getState();
+		if (state == null)
+		{
+			return TelemetryGrandExchangeSlot.UNAVAILABLE;
+		}
+		String name = state.name().toLowerCase(Locale.ROOT);
+		if (state == GrandExchangeOfferState.EMPTY)
+		{
+			// An empty slot's other readings describe an offer that does not exist.
+			return TelemetryGrandExchangeSlot.empty(name);
+		}
+		return TelemetryGrandExchangeSlot.offer(
+			name,
+			offer.getItemId(),
+			offer.getPrice(),
+			offer.getTotalQuantity(),
+			offer.getQuantitySold(),
+			offer.getSpent());
 	}
 
 	/**
@@ -606,7 +716,7 @@ public class FacetteTelemetryPlugin extends Plugin
 	{
 		for (Skill skill : Skill.values())
 		{
-			if (skill == null || "OVERALL".equals(skill.name()))
+			if (skill == null || OVERALL_SKILL_NAME.equals(skill.name()))
 			{
 				continue;
 			}

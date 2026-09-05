@@ -48,13 +48,22 @@ import java.util.function.LongSupplier;
  */
 final class TelemetrySnapshotWriter
 {
-	static final int MAX_SNAPSHOT_BYTES = 16_384;
+	// A backstop rather than the schema's bound: every exported string is length-bounded and every
+	// exported collection is fixed-size or bounded by a game enumeration, so no document the plugin
+	// can build comes near this. Schema 3's measured worst case is pinned in TelemetrySnapshotTest,
+	// and this number is chosen to sit above it with room to spare. It was 16,384 for schema 2,
+	// whose largest reachable document was around half of that; schema 3's per-skill block and offer
+	// slots take the measured worst case past that figure, so the guard moves with the schema rather
+	// than the schema being trimmed to fit a number.
+	static final int MAX_SNAPSHOT_BYTES = 24_576;
 
-	// Versioned, so schema 2 lands beside any schema-1 file rather than on top of it. This writer
-	// sweeps only its own prefix, so a state-v1.json alongside it is never touched.
-	static final String TARGET_FILE_NAME = "state-v2.json";
+	// Versioned, so schema 3 lands beside an earlier schema's file rather than on top of it. This
+	// writer sweeps only its own prefix, so a state-v1.json or state-v2.json alongside it is never
+	// touched: an older file simply stops being updated and goes stale, which is what a reader of
+	// that schema already knows how to notice.
+	static final String TARGET_FILE_NAME = "state-v3.json";
 
-	private static final String TEMP_PREFIX = "state-v2-";
+	private static final String TEMP_PREFIX = "state-v3-";
 	private static final String TEMP_SUFFIX = ".tmp";
 
 	// Well above the publish interval, so a second client's in-flight file is never deleted.

@@ -125,43 +125,53 @@ public class TelemetrySnapshotWriterTest
 	}
 
 	@Test
-	public void theTargetIsTheVersionedSchemaTwoFile()
+	public void theTargetIsTheVersionedSchemaThreeFile()
 	{
-		assertEquals("state-v2.json", TelemetrySnapshotWriter.TARGET_FILE_NAME);
-		assertEquals(directory.resolve("state-v2.json"),
+		assertEquals("state-v3.json", TelemetrySnapshotWriter.TARGET_FILE_NAME);
+		assertEquals(directory.resolve("state-v3.json"),
 			new TelemetrySnapshotWriter(directory).getTarget());
 	}
 
 	/**
-	 * Schema 2 lands beside a schema-1 file, never on top of it and never through it. The old
-	 * file is not read, not migrated, and not deleted, so a reader that still wants it finds it
+	 * Schema 3 lands beside an earlier schema's file, never on top of it and never through it. The
+	 * old file is not read, not migrated, and not deleted, so a reader that still wants it finds it
 	 * exactly as it was, going stale on its own.
+	 *
+	 * The schema-2 half of this is the whole upgrade story for a reader that has not moved yet: it
+	 * keeps the file it knows, unchanged, and its existing staleness rule tells it the file stopped
+	 * advancing. Nothing it reads is rewritten into a shape it does not understand.
 	 */
 	@Test
-	public void aSchemaOneFileInTheSameDirectoryIsNeitherReadMigratedNorDeleted() throws IOException
+	public void anEarlierSchemaFileInTheSameDirectoryIsNeitherReadMigratedNorDeleted()
+		throws IOException
 	{
 		Files.createDirectories(directory);
-		Path schemaOne = directory.resolve("state-v1.json");
-		byte[] original = "{\"schema\":1,\"source\":\"runelite\"}".getBytes(StandardCharsets.UTF_8);
-		Files.write(schemaOne, original);
-		// Old enough that the temporary-file sweep would remove it if it matched at all.
-		Files.setLastModifiedTime(schemaOne, FileTime.fromMillis(NOW - 600_000L));
-		Path schemaOneTemp = directory.resolve("state-v1-1111111111.tmp");
-		Files.write(schemaOneTemp, "stale v1 staging".getBytes(StandardCharsets.UTF_8));
-		Files.setLastModifiedTime(schemaOneTemp, FileTime.fromMillis(NOW - 600_000L));
+		for (String version : new String[]{"1", "2"})
+		{
+			Path earlier = directory.resolve("state-v" + version + ".json");
+			byte[] original = ("{\"schema\":" + version + ",\"source\":\"runelite\"}")
+				.getBytes(StandardCharsets.UTF_8);
+			Files.write(earlier, original);
+			// Old enough that the temporary-file sweep would remove it if it matched at all.
+			Files.setLastModifiedTime(earlier, FileTime.fromMillis(NOW - 600_000L));
+			Path earlierTemp = directory.resolve("state-v" + version + "-1111111111.tmp");
+			Files.write(earlierTemp, "stale staging".getBytes(StandardCharsets.UTF_8));
+			Files.setLastModifiedTime(earlierTemp, FileTime.fromMillis(NOW - 600_000L));
 
-		TelemetrySnapshotWriter writer =
-			new TelemetrySnapshotWriter(directory, Files::move, () -> NOW);
-		TelemetrySnapshot snapshot = snapshot(0L, "LOGGED_IN");
-		writer.write(snapshot, new ReentrantLock(), ALWAYS);
+			TelemetrySnapshotWriter writer =
+				new TelemetrySnapshotWriter(directory, Files::move, () -> NOW);
+			TelemetrySnapshot snapshot = snapshot(0L, "LOGGED_IN");
+			writer.write(snapshot, new ReentrantLock(), ALWAYS);
 
-		assertTrue("the schema-1 file must still exist", Files.isRegularFile(schemaOne));
-		assertArrayEquals("and must be byte-for-byte unchanged", original,
-			Files.readAllBytes(schemaOne));
-		assertTrue("a schema-1 temporary file is not this writer's to sweep",
-			Files.isRegularFile(schemaOneTemp));
-		assertArrayEquals(snapshot.toJsonBytes(),
-			Files.readAllBytes(directory.resolve("state-v2.json")));
+			assertTrue("the schema-" + version + " file must still exist",
+				Files.isRegularFile(earlier));
+			assertArrayEquals("and must be byte-for-byte unchanged", original,
+				Files.readAllBytes(earlier));
+			assertTrue("a schema-" + version + " temporary file is not this writer's to sweep",
+				Files.isRegularFile(earlierTemp));
+			assertArrayEquals(snapshot.toJsonBytes(),
+				Files.readAllBytes(directory.resolve("state-v3.json")));
+		}
 	}
 
 	@Test
@@ -232,7 +242,7 @@ public class TelemetrySnapshotWriterTest
 	}
 
 	/**
-	 * The writer's size guard is a backstop, not the primary bound: every string schema 2 exports
+	 * The writer's size guard is a backstop, not the primary bound: every string schema 3 exports
 	 * is length-bounded at serialization and every collection it exports is fixed-size or
 	 * enum-bounded, so no snapshot the plugin can build reaches the ceiling. The measured worst
 	 * case is pinned in {@code TelemetrySnapshotTest}. The guard still has to work, so it is
@@ -255,7 +265,8 @@ public class TelemetrySnapshotWriterTest
 		}
 		catch (TelemetrySnapshotWriter.SnapshotTooLargeException expected)
 		{
-			assertTrue(expected.getMessage(), expected.getMessage().contains("16384"));
+			assertTrue(expected.getMessage(), expected.getMessage()
+				.contains(String.valueOf(TelemetrySnapshotWriter.MAX_SNAPSHOT_BYTES)));
 		}
 
 		Path target = directory.resolve(TelemetrySnapshotWriter.TARGET_FILE_NAME);
@@ -357,8 +368,8 @@ public class TelemetrySnapshotWriterTest
 	public void sweepsAbandonedTemporaryFilesButLeavesRecentAndUnrelatedOnesAlone() throws IOException
 	{
 		Files.createDirectories(directory);
-		Path abandoned = directory.resolve("state-v2-9876543210.tmp");
-		Path recent = directory.resolve("state-v2-1234567890.tmp");
+		Path abandoned = directory.resolve("state-v3-9876543210.tmp");
+		Path recent = directory.resolve("state-v3-1234567890.tmp");
 		Path unrelated = directory.resolve("notes.txt");
 		Files.write(abandoned, "stale".getBytes(StandardCharsets.UTF_8));
 		Files.write(recent, "in flight".getBytes(StandardCharsets.UTF_8));
@@ -391,7 +402,7 @@ public class TelemetrySnapshotWriterTest
 		}
 		catch (TelemetrySnapshotWriter.CommitNotAuthorizedException expected)
 		{
-			assertTrue(expected.getMessage(), expected.getMessage().contains("state-v2.json"));
+			assertTrue(expected.getMessage(), expected.getMessage().contains("state-v3.json"));
 		}
 
 		Path target = directory.resolve(TelemetrySnapshotWriter.TARGET_FILE_NAME);

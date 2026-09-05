@@ -40,33 +40,39 @@ plugin. The plugin contains no network client or server code and makes no networ
 **No account credentials.** The plugin does not read, store, or export your account name, account
 hash, email, password, session token, or any other credential.
 
-### Exported under schema 2
+### Exported under schema 3
 
 Your own character only: session and world number, combat level, hitpoints, prayer points, run
 energy, special attack energy, weight, selected attack style, active prayers, the NPC you are
 interacting with, your eleven equipment slots, your twenty-eight inventory slots (item id,
 quantity, name), and experience *gained during the current tracked session*.
 
-### Not exported under schema 2
+Schema 3 adds, still about your own character only: every skill's level, boosted level, and
+lifetime experience; your account's mode, such as normal or ironman; your quest point total; your
+current Slayer task's remaining count and creature id; and your own Grand Exchange offer slots.
+Each of those groups reports whether it is carrying values, so a reader can tell "there is nothing
+there" from "this could not be read".
+
+### Not exported under schema 3
 
 Account name or hash, credentials, chat, friends, clan data, other players, any player target,
-bank contents, Grand Exchange data, item prices, aggregate wealth, quest or Slayer state, total or
-historical account experience, and location.
+bank contents, Seed Vault, collection log, quest-by-quest progress, item prices or valuations,
+aggregate wealth, Grand Exchange trade history, and location.
 
-The schema 2 field list is closed and documented in **[SCHEMA.md](SCHEMA.md)**, with two committed
-byte-exact examples: [a populated snapshot](src/test/resources/facette-osrs-state-v2.json) and
-[a logged-out snapshot](src/test/resources/facette-osrs-state-v2-logged-out.json).
+The schema 3 field list is closed and documented in **[SCHEMA.md](SCHEMA.md)**, with two committed
+byte-exact examples: [a populated snapshot](src/test/resources/facette-osrs-state-v3.json) and
+[a logged-out snapshot](src/test/resources/facette-osrs-state-v3-logged-out.json).
 
 ## Where the file is written
 
 On Windows:
 
 ```text
-%USERPROFILE%\.runelite\facette\state-v2.json
+%USERPROFILE%\.runelite\facette\state-v3.json
 ```
 
 On other platforms it is the same location relative to RuneLite's own data directory,
-`~/.runelite/facette/state-v2.json`.
+`~/.runelite/facette/state-v3.json`.
 
 That is the only path the plugin writes to. It creates the `facette` directory if it is missing,
 writes nothing inside your Old School RuneScape installation, does not scan your filesystem, and
@@ -115,7 +121,7 @@ Gradle install is needed.
 ./gradlew run           # launch a RuneLite development client with the plugin loaded
 ```
 
-Then enable **Facette Companion** in the client's plugin list and confirm that `state-v2.json`
+Then enable **Facette Companion** in the client's plugin list and confirm that `state-v3.json`
 appears at the path above.
 
 If your account requires Jagex Account authorization for the development client, that is yours to

@@ -41,11 +41,12 @@ import static org.junit.Assert.fail;
 import org.junit.Test;
 
 /**
- * Pins the exported schema-2 document: its exact keys, its key order at every level, its shape while
- * logged out, its size ceiling, and the absence of anything outside the schema.
+ * Pins the exported schema-3 document: its exact keys, its key order at every level, its shape while
+ * logged out, its capability answers, its size ceiling, and the absence of anything outside the
+ * schema.
  *
  * {@link #populatedFixture()} and {@link #loggedOutFixture()} are the single definition of what
- * schema 2 looks like, and {@code TelemetrySchemaFixtureTest} checks the committed files against
+ * schema 3 looks like, and {@code TelemetrySchemaFixtureTest} checks the committed files against
  * them, so the schema exists in one place.
  */
 public class TelemetrySnapshotTest
@@ -54,11 +55,22 @@ public class TelemetrySnapshotTest
 
 	private static final long EMITTED_AT = 1_770_000_000_000L;
 
-	private static final List<String> AUTHORIZED_TOP_LEVEL_KEYS = Arrays.asList(
+	/**
+	 * Schema 2's eleven keys in their original order, then schema 3's six appended after them. The
+	 * split is written out rather than merged, because "schema 3 is schema 2 plus a suffix" is the
+	 * compatibility promise and this is where it is enforced.
+	 */
+	private static final List<String> SCHEMA_TWO_TOP_LEVEL_KEYS = Arrays.asList(
 		"schema", "source", "instanceId", "seq", "emittedAt",
 		"session", "vitals", "combat", "equipment", "inventory", "xp");
 
-	private static final List<String> AUTHORIZED_SECOND_LEVEL_KEYS = Arrays.asList(
+	private static final List<String> SCHEMA_THREE_TOP_LEVEL_KEYS = Arrays.asList(
+		"capabilities", "skills", "account", "quests", "slayer", "grandExchange");
+
+	private static final List<String> AUTHORIZED_TOP_LEVEL_KEYS = concat(
+		SCHEMA_TWO_TOP_LEVEL_KEYS, SCHEMA_THREE_TOP_LEVEL_KEYS);
+
+	private static final List<String> SCHEMA_TWO_SECOND_LEVEL_KEYS = Arrays.asList(
 		"pluginActive", "gameState", "loggedIn", "world", "combatLevel", "trackingStartedAt",
 		"hitpointsCurrent", "hitpointsBase", "prayerCurrent", "prayerBase", "runEnergyPercent",
 		"specialAttackPercent", "weightKg",
@@ -66,6 +78,19 @@ public class TelemetrySnapshotTest
 		"slots",
 		"usedSlots", "freeSlots", "slots",
 		"lastSkill", "lastDelta", "lastChangedAt", "skills");
+
+	private static final List<String> SCHEMA_THREE_SECOND_LEVEL_KEYS = concat(
+		// capabilities: one entry per group, named by the group itself
+		TelemetrySnapshot.CAPABILITY_GROUPS,
+		Arrays.asList(
+			"entries",
+			"type", "typeId",
+			"points",
+			"remaining", "taskCreatureId",
+			"slots"));
+
+	private static final List<String> AUTHORIZED_SECOND_LEVEL_KEYS = concat(
+		SCHEMA_TWO_SECOND_LEVEL_KEYS, SCHEMA_THREE_SECOND_LEVEL_KEYS);
 
 	private static final List<String> TARGET_KEYS = Arrays.asList(
 		"kind", "id", "name", "combatLevel", "healthRatio", "healthScale", "dead");
@@ -76,24 +101,55 @@ public class TelemetrySnapshotTest
 	private static final List<String> SKILL_GAIN_KEYS = Arrays.asList(
 		"skill", "gained", "lastDelta", "lastChangedAt");
 
+	private static final List<String> SKILL_STATE_KEYS = Arrays.asList(
+		"skill", "level", "boostedLevel", "xp");
+
+	private static final List<String> OFFER_KEYS = Arrays.asList(
+		"slot", "state", "itemId", "price", "totalQuantity", "quantityTransacted", "spent");
+
 	/**
-	 * Key names that must never appear in the document. Schema 2 exports no account identity,
-	 * credential, chat, social, bank, price, valuation, quest, location, network, or control
-	 * data, and no player target.
+	 * Key names that must never appear in the document. Schema 3 exports no account identity,
+	 * credential, chat, social, bank, collection, valuation, location, network, or control data, and
+	 * no player target.
+	 *
+	 * Three names schema 2 refused are no longer on this list, because schema 3 exports exactly the
+	 * bounded facts they named and nothing adjacent to them: {@code account} is the account's mode
+	 * and never its identity, {@code grandExchange} is the player's own open offer slots and never a
+	 * price guide or a market, and {@code price} is an offer's own asking price. The identity names
+	 * beside {@code account} all stay forbidden, and {@code price} is separately pinned below to the
+	 * offers and nowhere else.
 	 */
 	private static final List<String> FORBIDDEN_KEYS = Arrays.asList(
-		"account", "accountId", "accountHash", "accountType", "username", "displayName",
+		"accountId", "accountHash", "accountType", "username", "displayName",
 		"playerName", "player", "email", "password", "token", "sessionToken", "credential",
 		"profile", "machineId", "installationId",
 		"chat", "message", "friends", "clan", "party", "players", "nearbyPlayers",
-		"bank", "wealth", "gp", "coins", "value", "price", "highAlch", "grandExchange", "ge",
-		"tradeable", "examine", "loadout",
-		"totalXp", "experience", "startingXp", "levels", "levelHistory",
-		"quest", "slayerTask", "clue", "loot", "achievement", "collectionLog", "diary",
+		"bank", "wealth", "gp", "coins", "value", "highAlch", "ge",
+		"tradeable", "examine", "loadout", "offers", "history", "sellPrice", "buyPrice",
+		"totalXp", "startingXp", "levelHistory",
+		"clue", "loot", "achievement", "collectionLog", "diary", "seedVault",
 		"location", "worldPoint", "regionId", "coordinates", "latitude", "longitude",
 		"x", "y", "plane", "tile", "movement",
 		"path", "url", "host", "address", "port", "endpoint",
 		"command", "input", "menu", "click", "keystroke", "ack", "sprite", "icon", "image");
+
+	/**
+	 * What the canonical populated document happens to contain. These are counts of the fixture, not
+	 * bounds of the schema: the schema bounds these groups by the client's own enumerations, and a
+	 * document that carries a different number of skills or offer slots is not malformed.
+	 */
+	private static final int FIXTURE_SESSION_GAINS = 3;
+
+	private static final int FIXTURE_SKILLS = 24;
+
+	private static final int FIXTURE_OFFER_SLOTS = 8;
+
+	private static List<String> concat(List<String> first, List<String> second)
+	{
+		List<String> all = new ArrayList<>(first);
+		all.addAll(second);
+		return Collections.unmodifiableList(all);
+	}
 
 	// --- the canonical documents ------------------------------------------------------------
 
@@ -119,13 +175,19 @@ public class TelemetrySnapshotTest
 				new TelemetrySkillGain("attack", 240, 40, 1_769_999_990_000L),
 				new TelemetrySkillGain("woodcutting", 130, 65, 1_769_999_998_000L),
 				new TelemetrySkillGain("fishing", 90, 30, 1_769_999_995_000L)))
+			.skills(fixtureSkillStates())
+			.account(0)
+			.quests(231)
+			.slayer(42, 494)
+			.grandExchange(fixtureGrandExchangeSlots())
 			.build();
 	}
 
 	/**
-	 * The logged-out canonical document: the complete schema-2 shape with every player-derived
+	 * The logged-out canonical document: the complete schema-3 shape with every player-derived
 	 * value nulled, which is what a reader sees whenever the snapshot carries no valid player
-	 * data.
+	 * data. Every schema-3 group reports itself unavailable here, which is the shape a reader has
+	 * to handle and so the shape a fixture has to show.
 	 */
 	static TelemetrySnapshot loggedOutFixture()
 	{
@@ -137,7 +199,71 @@ public class TelemetrySnapshotTest
 			.equipment(null)
 			.inventory(null, null, null)
 			.xp(null, null, null, null)
+			.skills(null)
+			.account(null)
+			.quests(null)
+			.slayer(null, null)
+			.grandExchange(null)
 			.build();
+	}
+
+	/**
+	 * One entry per skill the client enumerates today, in that order, with a spread that shows every
+	 * shape a reader must handle: a boost above the base level, a drain below it, an untrained skill
+	 * at level one with no experience, and a maximum level.
+	 *
+	 * Hand-written rather than generated from the client's enumeration, so this document stays the
+	 * same bytes whatever version of the client the build resolves. What keeps it honest about the
+	 * live enumeration is a separate lifecycle test, which drives the real reader and checks it
+	 * exports every skill the enumeration defines, in its order.
+	 */
+	private static List<TelemetrySkillState> fixtureSkillStates()
+	{
+		List<TelemetrySkillState> skills = new ArrayList<>();
+		skills.add(new TelemetrySkillState("attack", 70, 74, 737_627));
+		skills.add(new TelemetrySkillState("defence", 70, 70, 737_627));
+		skills.add(new TelemetrySkillState("strength", 72, 79, 992_895));
+		skills.add(new TelemetrySkillState("hitpoints", 75, 73, 1_210_421));
+		skills.add(new TelemetrySkillState("ranged", 61, 61, 320_000));
+		skills.add(new TelemetrySkillState("prayer", 52, 40, 131_000));
+		skills.add(new TelemetrySkillState("magic", 75, 75, 1_210_421));
+		skills.add(new TelemetrySkillState("cooking", 68, 68, 645_000));
+		skills.add(new TelemetrySkillState("woodcutting", 80, 80, 1_986_068));
+		skills.add(new TelemetrySkillState("fletching", 55, 55, 170_000));
+		skills.add(new TelemetrySkillState("fishing", 66, 66, 510_000));
+		skills.add(new TelemetrySkillState("firemaking", 61, 61, 320_000));
+		skills.add(new TelemetrySkillState("crafting", 54, 54, 155_000));
+		skills.add(new TelemetrySkillState("smithing", 50, 50, 101_333));
+		skills.add(new TelemetrySkillState("mining", 62, 62, 350_000));
+		skills.add(new TelemetrySkillState("herblore", 43, 43, 51_000));
+		skills.add(new TelemetrySkillState("agility", 58, 58, 240_000));
+		skills.add(new TelemetrySkillState("thieving", 49, 49, 92_000));
+		skills.add(new TelemetrySkillState("slayer", 63, 63, 380_000));
+		skills.add(new TelemetrySkillState("farming", 45, 45, 61_500));
+		skills.add(new TelemetrySkillState("runecraft", 42, 42, 46_000));
+		skills.add(new TelemetrySkillState("hunter", 40, 40, 37_224));
+		skills.add(new TelemetrySkillState("construction", 99, 99, 13_034_431));
+		skills.add(new TelemetrySkillState("sailing", 1, 1, 0));
+		return skills;
+	}
+
+	/**
+	 * Eight offer slots, which is what the client exposes today. Between them they show a buy in
+	 * progress, a completed sale, a cancelled offer, and the empty shape, so a reader sees both the
+	 * populated entry and the state-only one.
+	 */
+	private static List<TelemetryGrandExchangeSlot> fixtureGrandExchangeSlots()
+	{
+		List<TelemetryGrandExchangeSlot> slots = new ArrayList<>();
+		slots.add(TelemetryGrandExchangeSlot.offer("buying", 3001, 170, 1_000, 250, 42_500));
+		slots.add(TelemetryGrandExchangeSlot.offer("selling", 3002, 4_800, 24, 24, 115_200));
+		slots.add(TelemetryGrandExchangeSlot.offer("cancelled_buy", 3003, 96, 500, 120, 11_520));
+		slots.add(TelemetryGrandExchangeSlot.empty("empty"));
+		slots.add(TelemetryGrandExchangeSlot.empty("empty"));
+		slots.add(TelemetryGrandExchangeSlot.empty("empty"));
+		slots.add(TelemetryGrandExchangeSlot.empty("empty"));
+		slots.add(TelemetryGrandExchangeSlot.empty("empty"));
+		return slots;
 	}
 
 	/** Nine occupied slots and two empty ones, so both item shapes appear in the fixture. */
@@ -186,69 +312,86 @@ public class TelemetrySnapshotTest
 	// --- exact documents ---------------------------------------------------------------------
 
 	@Test
-	public void populatedSnapshotSerializesToTheExactSchemaTwoDocument()
+	public void populatedSnapshotSerializesToTheExactSchemaThreeDocument()
 	{
 		assertEquals(
-			"{\"schema\":2,\"source\":\"runelite\",\"instanceId\":\"" + INSTANCE_ID + "\","
-				+ "\"seq\":7,\"emittedAt\":1770000000000,"
-				+ "\"session\":{\"pluginActive\":true,\"gameState\":\"LOGGED_IN\",\"loggedIn\":true,"
-				+ "\"world\":302,\"combatLevel\":87,\"trackingStartedAt\":1769999940000},"
+			"{\"schema\":3,\"source\":\"runelite\",\"instanceId\":\""
+				+ INSTANCE_ID
+				+ "\",\"seq\":7,\"emittedAt\":1770000000000,\"session\":{\"pluginActive\":true,\"gameState\":\"LOGGED_IN\","
+				+ "\"loggedIn\":true,\"world\":302,\"combatLevel\":87,\"trackingStartedAt\":1769999940000},"
 				+ "\"vitals\":{\"hitpointsCurrent\":73,\"hitpointsBase\":75,\"prayerCurrent\":40,"
-				+ "\"prayerBase\":52,\"runEnergyPercent\":88,\"specialAttackPercent\":65,"
-				+ "\"weightKg\":12},"
-				+ "\"combat\":{\"attackStyle\":\"accurate\","
-				+ "\"activePrayers\":[\"protect_from_melee\",\"piety\"],"
-				+ "\"target\":{\"kind\":\"npc\",\"id\":4001,\"name\":\"Sample target dummy\","
-				+ "\"combatLevel\":21,\"healthRatio\":18,\"healthScale\":30,\"dead\":false}},"
-				+ "\"equipment\":{\"slots\":["
-				+ "{\"slot\":\"head\",\"itemId\":1101,\"quantity\":1,\"name\":\"Sample helm\"},"
-				+ "{\"slot\":\"cape\",\"itemId\":1102,\"quantity\":1,\"name\":\"Sample cape\"},"
-				+ "{\"slot\":\"amulet\",\"itemId\":1103,\"quantity\":1,\"name\":\"Sample amulet\"},"
-				+ "{\"slot\":\"weapon\",\"itemId\":1104,\"quantity\":1,\"name\":\"Sample blade\"},"
-				+ "{\"slot\":\"body\",\"itemId\":1105,\"quantity\":1,\"name\":\"Sample platebody\"},"
-				+ "{\"slot\":\"shield\",\"itemId\":null,\"quantity\":null,\"name\":null},"
-				+ "{\"slot\":\"legs\",\"itemId\":1107,\"quantity\":1,\"name\":\"Sample platelegs\"},"
-				+ "{\"slot\":\"gloves\",\"itemId\":1108,\"quantity\":1,\"name\":\"Sample gloves\"},"
-				+ "{\"slot\":\"boots\",\"itemId\":1109,\"quantity\":1,\"name\":\"Sample boots\"},"
-				+ "{\"slot\":\"ring\",\"itemId\":null,\"quantity\":null,\"name\":null},"
-				+ "{\"slot\":\"ammo\",\"itemId\":1111,\"quantity\":350,\"name\":\"Sample bolts\"}]},"
-				+ "\"inventory\":{\"usedSlots\":12,\"freeSlots\":16,\"slots\":["
-				+ "{\"slot\":0,\"itemId\":2001,\"quantity\":1,\"name\":\"Sample pickaxe\"},"
-				+ "{\"slot\":1,\"itemId\":2002,\"quantity\":1,\"name\":\"Sample hatchet\"},"
-				+ "{\"slot\":2,\"itemId\":2003,\"quantity\":4,\"name\":\"Sample loaf\"},"
-				+ "{\"slot\":3,\"itemId\":2004,\"quantity\":1500,\"name\":\"Sample coin pile\"},"
-				+ "{\"slot\":4,\"itemId\":2005,\"quantity\":3,\"name\":\"Sample potion\"},"
-				+ "{\"slot\":5,\"itemId\":2006,\"quantity\":1,\"name\":\"Sample teleport tablet\"},"
-				+ "{\"slot\":6,\"itemId\":2007,\"quantity\":27,\"name\":\"Sample logs\"},"
-				+ "{\"slot\":7,\"itemId\":2008,\"quantity\":12,\"name\":\"Sample ore\"},"
-				+ "{\"slot\":8,\"itemId\":2009,\"quantity\":1,\"name\":\"Sample gem\"},"
-				+ "{\"slot\":9,\"itemId\":2010,\"quantity\":6,\"name\":\"Sample herb\"},"
-				+ "{\"slot\":10,\"itemId\":2011,\"quantity\":2,\"name\":\"Sample plank\"},"
-				+ "{\"slot\":11,\"itemId\":2012,\"quantity\":1,\"name\":\"Sample seed pouch\"},"
-				+ "{\"slot\":12,\"itemId\":null,\"quantity\":null,\"name\":null},"
-				+ "{\"slot\":13,\"itemId\":null,\"quantity\":null,\"name\":null},"
-				+ "{\"slot\":14,\"itemId\":null,\"quantity\":null,\"name\":null},"
-				+ "{\"slot\":15,\"itemId\":null,\"quantity\":null,\"name\":null},"
-				+ "{\"slot\":16,\"itemId\":null,\"quantity\":null,\"name\":null},"
-				+ "{\"slot\":17,\"itemId\":null,\"quantity\":null,\"name\":null},"
-				+ "{\"slot\":18,\"itemId\":null,\"quantity\":null,\"name\":null},"
-				+ "{\"slot\":19,\"itemId\":null,\"quantity\":null,\"name\":null},"
-				+ "{\"slot\":20,\"itemId\":null,\"quantity\":null,\"name\":null},"
-				+ "{\"slot\":21,\"itemId\":null,\"quantity\":null,\"name\":null},"
-				+ "{\"slot\":22,\"itemId\":null,\"quantity\":null,\"name\":null},"
-				+ "{\"slot\":23,\"itemId\":null,\"quantity\":null,\"name\":null},"
-				+ "{\"slot\":24,\"itemId\":null,\"quantity\":null,\"name\":null},"
-				+ "{\"slot\":25,\"itemId\":null,\"quantity\":null,\"name\":null},"
-				+ "{\"slot\":26,\"itemId\":null,\"quantity\":null,\"name\":null},"
-				+ "{\"slot\":27,\"itemId\":null,\"quantity\":null,\"name\":null}]},"
-				+ "\"xp\":{\"lastSkill\":\"woodcutting\",\"lastDelta\":65,"
-				+ "\"lastChangedAt\":1769999998000,\"skills\":["
-				+ "{\"skill\":\"attack\",\"gained\":240,\"lastDelta\":40,"
-				+ "\"lastChangedAt\":1769999990000},"
-				+ "{\"skill\":\"woodcutting\",\"gained\":130,\"lastDelta\":65,"
-				+ "\"lastChangedAt\":1769999998000},"
-				+ "{\"skill\":\"fishing\",\"gained\":90,\"lastDelta\":30,"
-				+ "\"lastChangedAt\":1769999995000}]}}",
+				+ "\"prayerBase\":52,\"runEnergyPercent\":88,\"specialAttackPercent\":65,\"weightKg\":12},"
+				+ "\"combat\":{\"attackStyle\":\"accurate\",\"activePrayers\":[\"protect_from_melee\","
+				+ "\"piety\"],\"target\":{\"kind\":\"npc\",\"id\":4001,\"name\":\"Sample target dummy\","
+				+ "\"combatLevel\":21,\"healthRatio\":18,\"healthScale\":30,\"dead\":false}},\"equipment\":{\"slots\":[{\"slot\":\"head\","
+				+ "\"itemId\":1101,\"quantity\":1,\"name\":\"Sample helm\"},{\"slot\":\"cape\",\"itemId\":1102,"
+				+ "\"quantity\":1,\"name\":\"Sample cape\"},{\"slot\":\"amulet\",\"itemId\":1103,\"quantity\":1,"
+				+ "\"name\":\"Sample amulet\"},{\"slot\":\"weapon\",\"itemId\":1104,\"quantity\":1,\"name\":\"Sample blade\"},"
+				+ "{\"slot\":\"body\",\"itemId\":1105,\"quantity\":1,\"name\":\"Sample platebody\"},{\"slot\":\"shield\","
+				+ "\"itemId\":null,\"quantity\":null,\"name\":null},{\"slot\":\"legs\",\"itemId\":1107,"
+				+ "\"quantity\":1,\"name\":\"Sample platelegs\"},{\"slot\":\"gloves\",\"itemId\":1108,"
+				+ "\"quantity\":1,\"name\":\"Sample gloves\"},{\"slot\":\"boots\",\"itemId\":1109,\"quantity\":1,"
+				+ "\"name\":\"Sample boots\"},{\"slot\":\"ring\",\"itemId\":null,\"quantity\":null,\"name\":null},"
+				+ "{\"slot\":\"ammo\",\"itemId\":1111,\"quantity\":350,\"name\":\"Sample bolts\"}]},\"inventory\":{\"usedSlots\":12,"
+				+ "\"freeSlots\":16,\"slots\":[{\"slot\":0,\"itemId\":2001,\"quantity\":1,\"name\":\"Sample pickaxe\"},"
+				+ "{\"slot\":1,\"itemId\":2002,\"quantity\":1,\"name\":\"Sample hatchet\"},{\"slot\":2,"
+				+ "\"itemId\":2003,\"quantity\":4,\"name\":\"Sample loaf\"},{\"slot\":3,\"itemId\":2004,"
+				+ "\"quantity\":1500,\"name\":\"Sample coin pile\"},{\"slot\":4,\"itemId\":2005,\"quantity\":3,"
+				+ "\"name\":\"Sample potion\"},{\"slot\":5,\"itemId\":2006,\"quantity\":1,\"name\":\"Sample teleport tablet\"},"
+				+ "{\"slot\":6,\"itemId\":2007,\"quantity\":27,\"name\":\"Sample logs\"},{\"slot\":7,"
+				+ "\"itemId\":2008,\"quantity\":12,\"name\":\"Sample ore\"},{\"slot\":8,\"itemId\":2009,"
+				+ "\"quantity\":1,\"name\":\"Sample gem\"},{\"slot\":9,\"itemId\":2010,\"quantity\":6,"
+				+ "\"name\":\"Sample herb\"},{\"slot\":10,\"itemId\":2011,\"quantity\":2,\"name\":\"Sample plank\"},"
+				+ "{\"slot\":11,\"itemId\":2012,\"quantity\":1,\"name\":\"Sample seed pouch\"},{\"slot\":12,"
+				+ "\"itemId\":null,\"quantity\":null,\"name\":null},{\"slot\":13,\"itemId\":null,\"quantity\":null,"
+				+ "\"name\":null},{\"slot\":14,\"itemId\":null,\"quantity\":null,\"name\":null},{\"slot\":15,"
+				+ "\"itemId\":null,\"quantity\":null,\"name\":null},{\"slot\":16,\"itemId\":null,\"quantity\":null,"
+				+ "\"name\":null},{\"slot\":17,\"itemId\":null,\"quantity\":null,\"name\":null},{\"slot\":18,"
+				+ "\"itemId\":null,\"quantity\":null,\"name\":null},{\"slot\":19,\"itemId\":null,\"quantity\":null,"
+				+ "\"name\":null},{\"slot\":20,\"itemId\":null,\"quantity\":null,\"name\":null},{\"slot\":21,"
+				+ "\"itemId\":null,\"quantity\":null,\"name\":null},{\"slot\":22,\"itemId\":null,\"quantity\":null,"
+				+ "\"name\":null},{\"slot\":23,\"itemId\":null,\"quantity\":null,\"name\":null},{\"slot\":24,"
+				+ "\"itemId\":null,\"quantity\":null,\"name\":null},{\"slot\":25,\"itemId\":null,\"quantity\":null,"
+				+ "\"name\":null},{\"slot\":26,\"itemId\":null,\"quantity\":null,\"name\":null},{\"slot\":27,"
+				+ "\"itemId\":null,\"quantity\":null,\"name\":null}]},\"xp\":{\"lastSkill\":\"woodcutting\","
+				+ "\"lastDelta\":65,\"lastChangedAt\":1769999998000,\"skills\":[{\"skill\":\"attack\","
+				+ "\"gained\":240,\"lastDelta\":40,\"lastChangedAt\":1769999990000},{\"skill\":\"woodcutting\","
+				+ "\"gained\":130,\"lastDelta\":65,\"lastChangedAt\":1769999998000},{\"skill\":\"fishing\","
+				+ "\"gained\":90,\"lastDelta\":30,\"lastChangedAt\":1769999995000}]},\"capabilities\":{\"skills\":\"supported\","
+				+ "\"account\":\"supported\",\"quests\":\"supported\",\"slayer\":\"supported\",\"grandExchange\":\"supported\"},"
+				+ "\"skills\":{\"entries\":[{\"skill\":\"attack\",\"level\":70,\"boostedLevel\":74,\"xp\":737627},"
+				+ "{\"skill\":\"defence\",\"level\":70,\"boostedLevel\":70,\"xp\":737627},{\"skill\":\"strength\","
+				+ "\"level\":72,\"boostedLevel\":79,\"xp\":992895},{\"skill\":\"hitpoints\",\"level\":75,"
+				+ "\"boostedLevel\":73,\"xp\":1210421},{\"skill\":\"ranged\",\"level\":61,\"boostedLevel\":61,"
+				+ "\"xp\":320000},{\"skill\":\"prayer\",\"level\":52,\"boostedLevel\":40,\"xp\":131000},"
+				+ "{\"skill\":\"magic\",\"level\":75,\"boostedLevel\":75,\"xp\":1210421},{\"skill\":\"cooking\","
+				+ "\"level\":68,\"boostedLevel\":68,\"xp\":645000},{\"skill\":\"woodcutting\",\"level\":80,"
+				+ "\"boostedLevel\":80,\"xp\":1986068},{\"skill\":\"fletching\",\"level\":55,\"boostedLevel\":55,"
+				+ "\"xp\":170000},{\"skill\":\"fishing\",\"level\":66,\"boostedLevel\":66,\"xp\":510000},"
+				+ "{\"skill\":\"firemaking\",\"level\":61,\"boostedLevel\":61,\"xp\":320000},{\"skill\":\"crafting\","
+				+ "\"level\":54,\"boostedLevel\":54,\"xp\":155000},{\"skill\":\"smithing\",\"level\":50,"
+				+ "\"boostedLevel\":50,\"xp\":101333},{\"skill\":\"mining\",\"level\":62,\"boostedLevel\":62,"
+				+ "\"xp\":350000},{\"skill\":\"herblore\",\"level\":43,\"boostedLevel\":43,\"xp\":51000},"
+				+ "{\"skill\":\"agility\",\"level\":58,\"boostedLevel\":58,\"xp\":240000},{\"skill\":\"thieving\","
+				+ "\"level\":49,\"boostedLevel\":49,\"xp\":92000},{\"skill\":\"slayer\",\"level\":63,"
+				+ "\"boostedLevel\":63,\"xp\":380000},{\"skill\":\"farming\",\"level\":45,\"boostedLevel\":45,"
+				+ "\"xp\":61500},{\"skill\":\"runecraft\",\"level\":42,\"boostedLevel\":42,\"xp\":46000},"
+				+ "{\"skill\":\"hunter\",\"level\":40,\"boostedLevel\":40,\"xp\":37224},{\"skill\":\"construction\","
+				+ "\"level\":99,\"boostedLevel\":99,\"xp\":13034431},{\"skill\":\"sailing\",\"level\":1,"
+				+ "\"boostedLevel\":1,\"xp\":0}]},\"account\":{\"type\":\"normal\",\"typeId\":0},\"quests\":{\"points\":231},"
+				+ "\"slayer\":{\"remaining\":42,\"taskCreatureId\":494},\"grandExchange\":{\"slots\":[{\"slot\":0,"
+				+ "\"state\":\"buying\",\"itemId\":3001,\"price\":170,\"totalQuantity\":1000,\"quantityTransacted\":250,"
+				+ "\"spent\":42500},{\"slot\":1,\"state\":\"selling\",\"itemId\":3002,\"price\":4800,"
+				+ "\"totalQuantity\":24,\"quantityTransacted\":24,\"spent\":115200},{\"slot\":2,\"state\":\"cancelled_buy\","
+				+ "\"itemId\":3003,\"price\":96,\"totalQuantity\":500,\"quantityTransacted\":120,"
+				+ "\"spent\":11520},{\"slot\":3,\"state\":\"empty\",\"itemId\":null,\"price\":null,\"totalQuantity\":null,"
+				+ "\"quantityTransacted\":null,\"spent\":null},{\"slot\":4,\"state\":\"empty\",\"itemId\":null,"
+				+ "\"price\":null,\"totalQuantity\":null,\"quantityTransacted\":null,\"spent\":null},"
+				+ "{\"slot\":5,\"state\":\"empty\",\"itemId\":null,\"price\":null,\"totalQuantity\":null,"
+				+ "\"quantityTransacted\":null,\"spent\":null},{\"slot\":6,\"state\":\"empty\",\"itemId\":null,"
+				+ "\"price\":null,\"totalQuantity\":null,\"quantityTransacted\":null,\"spent\":null},"
+				+ "{\"slot\":7,\"state\":\"empty\",\"itemId\":null,\"price\":null,\"totalQuantity\":null,"
+				+ "\"quantityTransacted\":null,\"spent\":null}]}}",
 			populatedFixture().toJson());
 	}
 
@@ -256,26 +399,26 @@ public class TelemetrySnapshotTest
 	public void loggedOutSnapshotKeepsEveryKeyAndNullsEveryPlayerValue()
 	{
 		assertEquals(
-			"{\"schema\":2,\"source\":\"runelite\",\"instanceId\":\"" + INSTANCE_ID + "\","
-				+ "\"seq\":42,\"emittedAt\":1770000000000,"
-				+ "\"session\":{\"pluginActive\":true,\"gameState\":\"LOGIN_SCREEN\","
-				+ "\"loggedIn\":false,\"world\":null,\"combatLevel\":null,"
-				+ "\"trackingStartedAt\":null},"
-				+ "\"vitals\":{\"hitpointsCurrent\":null,\"hitpointsBase\":null,"
-				+ "\"prayerCurrent\":null,\"prayerBase\":null,\"runEnergyPercent\":null,"
-				+ "\"specialAttackPercent\":null,\"weightKg\":null},"
-				+ "\"combat\":{\"attackStyle\":null,\"activePrayers\":null,\"target\":null},"
-				+ "\"equipment\":{\"slots\":null},"
-				+ "\"inventory\":{\"usedSlots\":null,\"freeSlots\":null,\"slots\":null},"
-				+ "\"xp\":{\"lastSkill\":null,\"lastDelta\":null,\"lastChangedAt\":null,"
-				+ "\"skills\":null}}",
+			"{\"schema\":3,\"source\":\"runelite\",\"instanceId\":\""
+				+ INSTANCE_ID
+				+ "\",\"seq\":42,\"emittedAt\":1770000000000,\"session\":{\"pluginActive\":true,\"gameState\":\"LOGIN_SCREEN\","
+				+ "\"loggedIn\":false,\"world\":null,\"combatLevel\":null,\"trackingStartedAt\":null},"
+				+ "\"vitals\":{\"hitpointsCurrent\":null,\"hitpointsBase\":null,\"prayerCurrent\":null,"
+				+ "\"prayerBase\":null,\"runEnergyPercent\":null,\"specialAttackPercent\":null,"
+				+ "\"weightKg\":null},\"combat\":{\"attackStyle\":null,\"activePrayers\":null,\"target\":null},"
+				+ "\"equipment\":{\"slots\":null},\"inventory\":{\"usedSlots\":null,\"freeSlots\":null,"
+				+ "\"slots\":null},\"xp\":{\"lastSkill\":null,\"lastDelta\":null,\"lastChangedAt\":null,"
+				+ "\"skills\":null},\"capabilities\":{\"skills\":\"unavailable\",\"account\":\"unavailable\","
+				+ "\"quests\":\"unavailable\",\"slayer\":\"unavailable\",\"grandExchange\":\"unavailable\"},"
+				+ "\"skills\":{\"entries\":null},\"account\":{\"type\":null,\"typeId\":null},\"quests\":{\"points\":null},"
+				+ "\"slayer\":{\"remaining\":null,\"taskCreatureId\":null},\"grandExchange\":{\"slots\":null}}",
 			loggedOutFixture().toJson());
 	}
 
 	// --- key sets and key order --------------------------------------------------------------
 
 	@Test
-	public void topLevelKeysAreExactlyTheAuthorizedElevenInOrder()
+	public void topLevelKeysAreExactlyTheAuthorizedSeventeenInOrder()
 	{
 		assertEquals(AUTHORIZED_TOP_LEVEL_KEYS, keysByDepth(populatedFixture().toJson()).get(1));
 		assertEquals(AUTHORIZED_TOP_LEVEL_KEYS, keysByDepth(loggedOutFixture().toJson()).get(1));
@@ -291,11 +434,17 @@ public class TelemetrySnapshotTest
 	}
 
 	/**
-	 * The third level is the target object followed by every equipment entry, every inventory
-	 * entry, and every session-gain entry, each with its own fixed key order.
+	 * The third level is the target object, then every equipment entry, every inventory entry, every
+	 * session-gain entry, every skill entry, and every offer entry, each with its own fixed key
+	 * order. Written out in document order rather than as a set, because the order is the contract.
 	 */
 	@Test
-	public void thirdLevelKeysAreTheTargetThenEveryFixedSlotAndSkillEntryInOrder()
+	public void thirdLevelKeysAreEveryFixedEntryInDocumentOrder()
+	{
+		assertEquals(expectedThirdLevelKeys(), keysByDepth(populatedFixture().toJson()).get(3));
+	}
+
+	private static List<String> expectedThirdLevelKeys()
 	{
 		List<String> expected = new ArrayList<>(TARGET_KEYS);
 		for (int i = 0; i < TelemetrySnapshot.EQUIPMENT_SLOTS.size(); i++)
@@ -306,18 +455,26 @@ public class TelemetrySnapshotTest
 		{
 			expected.addAll(ITEM_SLOT_KEYS);
 		}
-		for (int i = 0; i < 3; i++)
+		for (int i = 0; i < FIXTURE_SESSION_GAINS; i++)
 		{
 			expected.addAll(SKILL_GAIN_KEYS);
 		}
-		assertEquals(expected, keysByDepth(populatedFixture().toJson()).get(3));
+		for (int i = 0; i < FIXTURE_SKILLS; i++)
+		{
+			expected.addAll(SKILL_STATE_KEYS);
+		}
+		for (int i = 0; i < FIXTURE_OFFER_SLOTS; i++)
+		{
+			expected.addAll(OFFER_KEYS);
+		}
+		return expected;
 	}
 
 	@Test
 	public void aLoggedOutDocumentHasNoThirdLevelAtAll()
 	{
 		Map<Integer, List<String>> keys = keysByDepth(loggedOutFixture().toJson());
-		assertEquals("only the envelope and its six objects", 2, keys.size());
+		assertEquals("only the envelope and its eleven objects", 2, keys.size());
 	}
 
 	@Test
@@ -325,12 +482,9 @@ public class TelemetrySnapshotTest
 	{
 		Map<Integer, List<String>> keys = keysByDepth(populatedFixture().toJson());
 		assertEquals("no nesting beyond three levels of objects", 3, keys.size());
-		int thirdLevel = TARGET_KEYS.size()
-			+ ITEM_SLOT_KEYS.size() * TelemetrySnapshot.EQUIPMENT_SLOTS.size()
-			+ ITEM_SLOT_KEYS.size() * TelemetrySnapshot.INVENTORY_SLOTS
-			+ SKILL_GAIN_KEYS.size() * 3;
 		assertEquals(
-			AUTHORIZED_TOP_LEVEL_KEYS.size() + AUTHORIZED_SECOND_LEVEL_KEYS.size() + thirdLevel,
+			AUTHORIZED_TOP_LEVEL_KEYS.size() + AUTHORIZED_SECOND_LEVEL_KEYS.size()
+				+ expectedThirdLevelKeys().size(),
 			keys.get(1).size() + keys.get(2).size() + keys.get(3).size());
 	}
 
@@ -346,12 +500,242 @@ public class TelemetrySnapshotTest
 
 		String json = populatedFixture().toJson();
 		assertEquals(11, countOccurrences(json, "{\"slot\":\""));
-		assertEquals(28, countOccurrences(json, "{\"slot\":") - 11);
+		// Offer entries open with a numbered slot too, so they are counted and subtracted rather
+		// than left to make the inventory look larger than it is.
+		int offers = countOccurrences(json, ",\"state\":\"");
+		assertEquals(FIXTURE_OFFER_SLOTS, offers);
+		assertEquals(28, countOccurrences(json, "{\"slot\":") - 11 - offers);
 		for (int slot = 0; slot < TelemetrySnapshot.INVENTORY_SLOTS; slot++)
 		{
 			assertTrue("inventory slot " + slot + " must appear exactly once in position",
 				json.contains("{\"slot\":" + slot + ",\"itemId\":"));
 		}
+	}
+
+	// --- capabilities --------------------------------------------------------------------------
+
+	/**
+	 * The one property the capability block exists to carry: a group says supported exactly when it
+	 * is carrying values. Checked over every group and over both canonical documents, so neither
+	 * half of the claim can drift on its own.
+	 */
+	@Test
+	public void everyCapabilityAgreesWithWhetherItsGroupCarriesValues()
+	{
+		for (TelemetrySnapshot snapshot
+			: Arrays.asList(populatedFixture(), loggedOutFixture()))
+		{
+			String json = snapshot.toJson();
+			for (String group : TelemetrySnapshot.CAPABILITY_GROUPS)
+			{
+				boolean supported = snapshot.capability(group) == TelemetryCapability.SUPPORTED;
+				assertEquals("capability for " + group,
+					supported ? "supported" : "unavailable",
+					capabilityIn(json, group));
+				assertEquals(group + " must carry values only while it says it does",
+					supported, groupCarriesValues(json, group));
+			}
+		}
+	}
+
+	@Test
+	public void everyGroupIsSupportedInThePopulatedDocumentAndUnavailableWhenLoggedOut()
+	{
+		for (String group : TelemetrySnapshot.CAPABILITY_GROUPS)
+		{
+			assertEquals(group, TelemetryCapability.SUPPORTED, populatedFixture().capability(group));
+			assertEquals(group, TelemetryCapability.UNAVAILABLE, loggedOutFixture().capability(group));
+		}
+	}
+
+	/**
+	 * One group failing to read must not take the others down with it. This is what "missing facts
+	 * degrade explicitly" means in the document: the unread group is null and says so, and every
+	 * other group is untouched.
+	 */
+	@Test
+	public void oneUnavailableGroupLeavesEveryOtherGroupSupported()
+	{
+		for (String absent : TelemetrySnapshot.CAPABILITY_GROUPS)
+		{
+			TelemetrySnapshot snapshot = allGroupsExcept(absent);
+			assertEquals(absent, TelemetryCapability.UNAVAILABLE, snapshot.capability(absent));
+			for (String group : TelemetrySnapshot.CAPABILITY_GROUPS)
+			{
+				if (!group.equals(absent))
+				{
+					assertEquals(absent + " must not disturb " + group,
+						TelemetryCapability.SUPPORTED, snapshot.capability(group));
+				}
+			}
+			// The whole schema-2 half of the document is unaffected too.
+			assertTrue(absent, snapshot.toJson().contains("\"loggedIn\":true"));
+		}
+	}
+
+	/** Every group present except the named one, which is left unread. */
+	private static TelemetrySnapshot allGroupsExcept(String absent)
+	{
+		TelemetrySnapshot.Builder b = TelemetrySnapshot.builder()
+			.envelope(INSTANCE_ID, 1L, EMITTED_AT)
+			.session(true, "LOGGED_IN", true, 302, 87, EMITTED_AT)
+			.skills(absent.equals("skills") ? null : fixtureSkillStates())
+			.account(absent.equals("account") ? null : Integer.valueOf(0))
+			.quests(absent.equals("quests") ? null : Integer.valueOf(231))
+			.grandExchange(absent.equals("grandExchange") ? null : fixtureGrandExchangeSlots());
+		return absent.equals("slayer")
+			? b.slayer(null, null).build()
+			: b.slayer(42, 494).build();
+	}
+
+	private static String capabilityIn(String json, String group)
+	{
+		String at = "\"capabilities\":{";
+		String block = json.substring(json.indexOf(at) + at.length());
+		block = block.substring(0, block.indexOf('}'));
+		for (String entry : block.split(","))
+		{
+			String[] pair = entry.split(":");
+			if (pair[0].equals("\"" + group + "\""))
+			{
+				return pair[1].replace("\"", "");
+			}
+		}
+		fail("no capability entry for " + group);
+		return null;
+	}
+
+	/**
+	 * Whether the named group's own object carries anything but nulls. The unavailable shape is
+	 * every field of the group written as null, and nothing else is, so matching that shape exactly
+	 * is the whole test.
+	 */
+	private static boolean groupCarriesValues(String json, String group)
+	{
+		int at = json.lastIndexOf("\"" + group + "\":{");
+		assertTrue("no group object for " + group, at >= 0);
+		String block = json.substring(at + group.length() + 4);
+		int depth = 1;
+		int end = 0;
+		while (end < block.length() && depth > 0)
+		{
+			char c = block.charAt(end);
+			if (c == '{' || c == '[')
+			{
+				depth++;
+			}
+			else if (c == '}' || c == ']')
+			{
+				depth--;
+			}
+			end++;
+		}
+		String body = block.substring(0, end - 1);
+		return !body.matches("(\"[A-Za-z]+\":null)(,\"[A-Za-z]+\":null)*");
+	}
+
+	@Test
+	public void anAccountModeThisBuildCannotNameStillReportsItsReading()
+	{
+		String json = TelemetrySnapshot.builder()
+			.envelope(INSTANCE_ID, 1L, EMITTED_AT)
+			.session(true, "LOGGED_IN", true, 302, 87, EMITTED_AT)
+			.account(99)
+			.build()
+			.toJson();
+		// The name is unknown, the reading is not, and the group is still supported: rounding an
+		// unknown mode down to "normal" would be the fabricated default the schema refuses.
+		assertTrue(json, json.contains("\"account\":{\"type\":null,\"typeId\":99}"));
+		assertTrue(json, json.contains("\"account\":\"supported\""));
+	}
+
+	@Test
+	public void everyNamedAccountModeSerializesItsOwnName()
+	{
+		for (TelemetryAccountType type : TelemetryAccountType.values())
+		{
+			String json = TelemetrySnapshot.builder()
+				.envelope(INSTANCE_ID, 1L, EMITTED_AT)
+				.session(true, "LOGGED_IN", true, 302, 87, EMITTED_AT)
+				.account(type.getTypeId())
+				.build()
+				.toJson();
+			assertTrue(json, json.contains("\"account\":{\"type\":\"" + type.exported()
+				+ "\",\"typeId\":" + type.getTypeId() + "}"));
+		}
+	}
+
+	@Test
+	public void aSlayerTaskCreatureCannotBeReportedWithoutItsRemainingCount()
+	{
+		try
+		{
+			TelemetrySnapshot.builder()
+				.envelope(INSTANCE_ID, 1L, EMITTED_AT)
+				.session(true, "LOGGED_IN", true, 302, 87, EMITTED_AT)
+				.slayer(null, 494)
+				.build();
+			fail("a creature without a count must not build");
+		}
+		catch (IllegalArgumentException expected)
+		{
+			assertTrue(expected.getMessage(), expected.getMessage().contains("remaining count"));
+		}
+	}
+
+	@Test
+	public void noTaskAssignedIsASupportedAnswerRatherThanAnUnavailableOne()
+	{
+		TelemetrySnapshot snapshot = TelemetrySnapshot.builder()
+			.envelope(INSTANCE_ID, 1L, EMITTED_AT)
+			.session(true, "LOGGED_IN", true, 302, 87, EMITTED_AT)
+			.slayer(0, null)
+			.build();
+		assertEquals(TelemetryCapability.SUPPORTED, snapshot.capability("slayer"));
+		assertTrue(snapshot.toJson(),
+			snapshot.toJson().contains("\"slayer\":{\"remaining\":0,\"taskCreatureId\":null}"));
+	}
+
+	@Test
+	public void anEmptyOfferSlotCarriesItsStateAndNothingElse()
+	{
+		String json = offersOf(TelemetryGrandExchangeSlot.empty("empty"));
+		assertTrue(json, json.contains("{\"slot\":0,\"state\":\"empty\",\"itemId\":null,"
+			+ "\"price\":null,\"totalQuantity\":null,\"quantityTransacted\":null,\"spent\":null}"));
+	}
+
+	/**
+	 * A slot whose readings contradict each other is exported as unavailable rather than as an offer
+	 * carrying a figure that cannot be true.
+	 */
+	@Test
+	public void anOfferTransactingMoreThanItOrderedIsNotExportedAsAnOffer()
+	{
+		String json = offersOf(
+			TelemetryGrandExchangeSlot.offer("buying", 3001, 170, 10, 11, 1_700));
+		assertTrue(json, json.contains("{\"slot\":0,\"state\":null,\"itemId\":null,"
+			+ "\"price\":null,\"totalQuantity\":null,\"quantityTransacted\":null,\"spent\":null}"));
+	}
+
+	@Test
+	public void anOfferPriceAppearsOnlyInsideTheGrandExchangeSlots()
+	{
+		String json = populatedFixture().toJson();
+		int offers = json.indexOf("\"grandExchange\":{");
+		assertTrue(json, offers > 0);
+		assertEquals("a price outside the offer slots is a valuation, which schema 3 refuses",
+			0, countOccurrences(json.substring(0, offers), "\"price\":"));
+		assertEquals(FIXTURE_OFFER_SLOTS, countOccurrences(json, "\"price\":"));
+	}
+
+	private static String offersOf(TelemetryGrandExchangeSlot... slots)
+	{
+		return TelemetrySnapshot.builder()
+			.envelope(INSTANCE_ID, 1L, EMITTED_AT)
+			.session(true, "LOGGED_IN", true, 302, 87, EMITTED_AT)
+			.grandExchange(Arrays.asList(slots))
+			.build()
+			.toJson();
 	}
 
 	// --- forbidden content --------------------------------------------------------------------
@@ -370,7 +754,7 @@ public class TelemetrySnapshotTest
 				}
 			}
 		}
-		assertEquals("forbidden fields present in schema 2", new ArrayList<String>(), present);
+		assertEquals("forbidden fields present in schema 3", new ArrayList<String>(), present);
 	}
 
 	@Test
@@ -481,9 +865,11 @@ public class TelemetrySnapshotTest
 			populatedFixture().toJson().getBytes(StandardCharsets.UTF_8).length);
 		assertTrue("populated fixture is " + populated.length + " bytes",
 			populated.length < TelemetrySnapshotWriter.MAX_SNAPSHOT_BYTES);
+		// Schema 3 is roughly twice schema 2's populated size, almost all of it the per-skill block
+		// and the offer slots. Still a small fraction of the ceiling.
 		assertTrue("populated fixture is " + populated.length + " bytes",
-			populated.length < 4_096);
-		assertTrue(loggedOutFixture().toJsonBytes().length < 1_024);
+			populated.length < 8_192);
+		assertTrue(loggedOutFixture().toJsonBytes().length < 2_048);
 	}
 
 	/**
@@ -524,6 +910,24 @@ public class TelemetrySnapshotTest
 				Integer.MAX_VALUE, Integer.MAX_VALUE, 9_999_999_999_999L));
 		}
 
+		// One entry per skill the client could enumerate, at the maximum exported name length, and
+		// one offer per slot the client could expose. Both counts are over-stated for the same
+		// reason as the two above: the real bound is an enumeration this test cannot read.
+		List<TelemetrySkillState> maxSkillStates = new ArrayList<>();
+		for (int i = 0; i < 40; i++)
+		{
+			maxSkillStates.add(new TelemetrySkillState(
+				repeat('K', TelemetrySnapshot.MAX_SKILL_CHARS - 3) + String.format("%03d", i),
+				Integer.MAX_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE));
+		}
+		List<TelemetryGrandExchangeSlot> maxOffers = new ArrayList<>();
+		for (int i = 0; i < 16; i++)
+		{
+			maxOffers.add(TelemetryGrandExchangeSlot.offer(
+				repeat('O', TelemetrySnapshot.MAX_OFFER_STATE_CHARS), Integer.MAX_VALUE,
+				Integer.MAX_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE));
+		}
+
 		TelemetrySnapshot largest = TelemetrySnapshot.builder()
 			.envelope(repeat('I', TelemetrySnapshot.MAX_INSTANCE_ID_CHARS), Long.MAX_VALUE,
 				9_999_999_999_999L)
@@ -539,6 +943,11 @@ public class TelemetrySnapshotTest
 			.inventory(TelemetrySnapshot.INVENTORY_SLOTS, 0, maxInventory)
 			.xp(repeat('L', TelemetrySnapshot.MAX_SKILL_CHARS), Integer.MAX_VALUE,
 				9_999_999_999_999L, maxSkills)
+			.skills(maxSkillStates)
+			.account(Integer.MAX_VALUE)
+			.quests(Integer.MAX_VALUE)
+			.slayer(Integer.MAX_VALUE, Integer.MAX_VALUE)
+			.grandExchange(maxOffers)
 			.build();
 
 		int size = largest.toJsonBytes().length;
@@ -557,9 +966,9 @@ public class TelemetrySnapshotTest
 	@Test
 	public void schemaVersionAndSourceArePinned()
 	{
-		assertEquals(2, TelemetrySnapshot.SCHEMA);
+		assertEquals(3, TelemetrySnapshot.SCHEMA);
 		assertEquals("runelite", TelemetrySnapshot.SOURCE);
-		assertTrue(populatedFixture().toJson().startsWith("{\"schema\":2,\"source\":\"runelite\","));
+		assertTrue(populatedFixture().toJson().startsWith("{\"schema\":3,\"source\":\"runelite\","));
 	}
 
 	@Test
