@@ -31,11 +31,13 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
@@ -61,6 +63,8 @@ import net.runelite.api.Client;
 import net.runelite.api.EnumComposition;
 import net.runelite.api.EnumID;
 import net.runelite.api.GameState;
+import net.runelite.api.GrandExchangeOffer;
+import net.runelite.api.GrandExchangeOfferState;
 import net.runelite.api.Item;
 import net.runelite.api.ItemComposition;
 import net.runelite.api.ItemContainer;
@@ -841,7 +845,7 @@ public class FacetteTelemetryPluginLifecycleTest
 	// --- 12. what a live sample actually reads ------------------------------------------------
 
 	@Test
-	public void aLiveSampleWritesTheCompleteSchemaTwoPlayerBlock() throws IOException
+	public void aLiveSampleWritesTheCompleteSchemaThreePlayerBlock() throws IOException
 	{
 		logInClient();
 		wornItems[3] = new Item(1104, 1);
@@ -853,7 +857,7 @@ public class FacetteTelemetryPluginLifecycleTest
 		onlyExecutor().runScheduledTaskOnce();
 
 		String json = snapshotOnDisk();
-		assertEquals("2", value(json, "schema"));
+		assertEquals("3", value(json, "schema"));
 		assertEquals("true", value(json, "loggedIn"));
 		assertEquals("302", value(json, "world"));
 		assertEquals("87", value(json, "combatLevel"));
@@ -1097,8 +1101,12 @@ public class FacetteTelemetryPluginLifecycleTest
 	}
 
 	/**
-	 * The written document, scanned for the things schema 2 is closed against. This is the check
+	 * The written document, scanned for the things schema 3 is closed against. This is the check
 	 * that runs against a real file the plugin produced rather than against a hand-built one.
+	 *
+	 * {@code grandExchange} and {@code price} left this list when schema 3 began exporting the
+	 * player's own offer slots. Everything that would identify the account, describe anyone else,
+	 * value what the player owns, or lead anywhere off the machine stays on it.
 	 */
 	@Test
 	public void theWrittenDocumentContainsNoIdentitySocialBankLocationOrControlContent()
@@ -1116,11 +1124,11 @@ public class FacetteTelemetryPluginLifecycleTest
 		String json = snapshotOnDisk();
 		for (String forbidden : new String[]{"accountHash", "accountType", "username",
 			"displayName", "playerName", "email", "password", "token", "credential", "profile",
-			"chat", "friends", "clan", "party", "nearbyPlayers", "bank", "wealth", "grandExchange",
-			"price", "value", "tradeable", "examine", "totalXp", "startingXp", "quest", "slayerTask",
+			"chat", "friends", "clan", "party", "nearbyPlayers", "bank", "wealth",
+			"value", "tradeable", "examine", "totalXp", "startingXp", "slayerTask",
 			"loot", "worldPoint", "regionId", "coordinates", "plane", "movement", "url", "http",
-			"://", "command", "menu", "click", "keystroke", "sprite", "icon",
-			"TheOperatorsCharacter"})
+			"://", "command", "menu", "click", "keystroke", "sprite", "icon", "collectionLog",
+			"seedVault", "TheOperatorsCharacter"})
 		{
 			assertFalse("the written document must not contain " + forbidden,
 				json.contains(forbidden));
@@ -1129,6 +1137,489 @@ public class FacetteTelemetryPluginLifecycleTest
 			json.contains(temporaryFolder.getRoot().getAbsolutePath()));
 
 		plugin.shutDown();
+	}
+
+	// --- schema-3 groups -------------------------------------------------------------------
+
+	/**
+	 * The per-skill block covers the client's own skill enumeration exactly: one entry per member,
+	 * in the enumeration's order, under the enumeration's own lowercased name. This is the check the
+	 * committed fixture cannot make, because the fixture is a fixed document and the enumeration is
+	 * whatever the resolved client defines. A skill added upstream shows up here.
+	 */
+	@Test
+	public void thePerSkillBlockCoversTheClientsSkillEnumerationInOrder() throws IOException
+	{
+		logInClient();
+		giveClientReadableSkills();
+
+		plugin.startUp();
+		runClientThreadQueue();
+		onlyExecutor().runScheduledTaskOnce();
+
+		String json = snapshotOnDisk();
+		StringBuilder expected = new StringBuilder("[");
+		for (Skill skill : exportedSkills())
+		{
+			if (expected.length() > 1)
+			{
+				expected.append(',');
+			}
+			expected.append("{\"skill\":\"").append(skill.name().toLowerCase(Locale.ROOT))
+				.append("\",\"level\":").append(60 + skill.ordinal())
+				.append(",\"boostedLevel\":").append(61 + skill.ordinal())
+				.append(",\"xp\":").append(100_000 + skill.ordinal())
+				.append('}');
+		}
+		expected.append(']');
+		assertTrue("the skill block must cover the client's enumeration exactly, in its order: "
+			+ json, json.contains("\"skills\":{\"entries\":" + expected + "}"));
+		assertTrue(json, json.contains("\"skills\":\"supported\""));
+
+		plugin.shutDown();
+	}
+
+	/**
+	 * One unreadable skill makes the whole group unavailable rather than exporting a list that looks
+	 * complete with a silent zero in it, and the rest of the document is untouched.
+	 */
+	@Test
+	public void oneUnreadableSkillMakesTheWholeSkillGroupUnavailable() throws IOException
+	{
+		logInClient();
+		giveClientReadableSkills();
+		when(client.getSkillExperience(Skill.MAGIC)).thenReturn(-1);
+
+		plugin.startUp();
+		runClientThreadQueue();
+		onlyExecutor().runScheduledTaskOnce();
+
+		String json = snapshotOnDisk();
+		assertTrue(json, json.contains("\"skills\":\"unavailable\""));
+		assertTrue(json, json.contains("\"skills\":{\"entries\":null}"));
+		assertTrue("the rest of the document is unaffected", json.contains("\"loggedIn\":true"));
+		assertTrue("and every other group still answers for itself",
+			json.contains("\"quests\":\"supported\""));
+
+		plugin.shutDown();
+	}
+
+	/**
+	 * The account mode, the quest point total, and the slayer task all come from the client's own
+	 * variables, and each is read from the variable this schema documents.
+	 */
+	@Test
+	public void theAccountQuestAndSlayerGroupsComeFromTheDocumentedVariables() throws IOException
+	{
+		logInClient();
+		when(client.getVarbitValue(VarbitID.IRONMAN)).thenReturn(3);
+		when(client.getVarpValue(VarPlayerID.QP)).thenReturn(231);
+		when(client.getVarpValue(VarPlayerID.SLAYER_COUNT)).thenReturn(42);
+		when(client.getVarpValue(VarPlayerID.SLAYER_TARGET)).thenReturn(494);
+
+		plugin.startUp();
+		runClientThreadQueue();
+		onlyExecutor().runScheduledTaskOnce();
+
+		String json = snapshotOnDisk();
+		assertTrue(json, json.contains(
+			"\"account\":{\"type\":\"hardcore_ironman\",\"typeId\":3}"));
+		assertTrue(json, json.contains("\"quests\":{\"points\":231}"));
+		assertTrue(json, json.contains("\"slayer\":{\"remaining\":42,\"taskCreatureId\":494}"));
+
+		plugin.shutDown();
+	}
+
+	/**
+	 * The offer slots are read from the client's own offer array, one entry per slot it exposes, and
+	 * nothing about any item in them is looked up. A slot holding no offer carries its state alone.
+	 */
+	@Test
+	public void theOfferSlotsComeFromTheClientsOwnOfferArray() throws IOException
+	{
+		logInClient();
+		// Built before the array is handed over: stubbing one mock inside another stub's argument
+		// list is an unfinished stubbing as far as Mockito is concerned.
+		GrandExchangeOffer buying =
+			offer(GrandExchangeOfferState.BUYING, 3001, 170, 1_000, 250, 42_500);
+		GrandExchangeOffer empty = offer(GrandExchangeOfferState.EMPTY, 0, 0, 0, 0, 0);
+		when(client.getGrandExchangeOffers()).thenReturn(new GrandExchangeOffer[]{buying, empty});
+
+		plugin.startUp();
+		runClientThreadQueue();
+		onlyExecutor().runScheduledTaskOnce();
+
+		String json = snapshotOnDisk();
+		assertTrue(json, json.contains("\"grandExchange\":{\"slots\":["
+			+ "{\"slot\":0,\"state\":\"buying\",\"itemId\":3001,\"price\":170,"
+			+ "\"totalQuantity\":1000,\"quantityTransacted\":250,\"spent\":42500},"
+			+ "{\"slot\":1,\"state\":\"empty\",\"itemId\":null,\"price\":null,"
+			+ "\"totalQuantity\":null,\"quantityTransacted\":null,\"spent\":null}]}"));
+		assertTrue(json, json.contains("\"grandExchange\":\"supported\""));
+
+		plugin.shutDown();
+	}
+
+	/**
+	 * A client with no offer array to give is an unavailable group, not an empty one. "No offers"
+	 * and "could not read the offers" are different answers and a reader has to be able to tell.
+	 */
+	@Test
+	public void aClientWithNoOfferArrayReportsTheGroupUnavailable() throws IOException
+	{
+		logInClient();
+		when(client.getGrandExchangeOffers()).thenReturn(null);
+
+		plugin.startUp();
+		runClientThreadQueue();
+		onlyExecutor().runScheduledTaskOnce();
+
+		String json = snapshotOnDisk();
+		assertTrue(json, json.contains("\"grandExchange\":{\"slots\":null}"));
+		assertTrue(json, json.contains("\"grandExchange\":\"unavailable\""));
+
+		plugin.shutDown();
+	}
+
+	/**
+	 * A base level of zero is the client's arrays before they were filled in, not a level anyone has,
+	 * so it makes the group unavailable rather than being exported as a real reading. Zero experience
+	 * stays valid, because an untrained skill genuinely has none.
+	 */
+	@Test
+	public void aBaseLevelOfZeroMakesTheSkillGroupUnavailable() throws IOException
+	{
+		logInClient();
+		giveClientReadableSkills();
+		when(client.getRealSkillLevel(Skill.MAGIC)).thenReturn(0);
+
+		plugin.startUp();
+		runClientThreadQueue();
+		onlyExecutor().runScheduledTaskOnce();
+
+		String json = snapshotOnDisk();
+		assertTrue(json, json.contains("\"skills\":\"unavailable\""));
+		assertTrue(json, json.contains("\"skills\":{\"entries\":null}"));
+
+		plugin.shutDown();
+	}
+
+	@Test
+	public void zeroExperienceInAnUntrainedSkillIsStillASupportedReading() throws IOException
+	{
+		logInClient();
+		giveClientReadableSkills();
+		when(client.getRealSkillLevel(Skill.MAGIC)).thenReturn(1);
+		when(client.getBoostedSkillLevel(Skill.MAGIC)).thenReturn(1);
+		when(client.getSkillExperience(Skill.MAGIC)).thenReturn(0);
+
+		plugin.startUp();
+		runClientThreadQueue();
+		onlyExecutor().runScheduledTaskOnce();
+
+		String json = snapshotOnDisk();
+		assertTrue(json, json.contains("\"skills\":\"supported\""));
+		assertTrue(json, json.contains(
+			"{\"skill\":\"magic\",\"level\":1,\"boostedLevel\":1,\"xp\":0}"));
+
+		plugin.shutDown();
+	}
+
+	/**
+	 * A group that read cleanly once and then fails must stop being published, not keep being
+	 * republished as supported beside a fresh emittedAt. That would be last-known data presented as
+	 * current, which is exactly what the capability block exists to prevent.
+	 */
+	@Test
+	public void aGroupThatStopsReadingIsClearedRatherThanRepublishedStale() throws IOException
+	{
+		logInClient();
+		giveClientReadableSkills();
+		GrandExchangeOffer buying =
+			offer(GrandExchangeOfferState.BUYING, 3001, 170, 1_000, 250, 42_500);
+		when(client.getGrandExchangeOffers()).thenReturn(new GrandExchangeOffer[]{buying});
+
+		plugin.startUp();
+		runClientThreadQueue();
+		ControlledPublisher executor = onlyExecutor();
+		executor.runScheduledTaskOnce();
+
+		String first = snapshotOnDisk();
+		assertTrue(first, first.contains("\"skills\":\"supported\""));
+		assertTrue(first, first.contains("\"grandExchange\":\"supported\""));
+
+		// The client stops answering for both groups, while the session stays live.
+		when(client.getRealSkillLevel(Skill.MAGIC)).thenReturn(0);
+		when(client.getGrandExchangeOffers()).thenReturn(null);
+		when(client.getVarpValue(VarPlayerID.QP)).thenReturn(-1);
+		tick();
+		executor.runScheduledTaskOnce();
+
+		String second = snapshotOnDisk();
+		assertNotEquals("the snapshot must have been republished", first, second);
+		assertTrue("the session is still live", second.contains("\"loggedIn\":true"));
+		assertTrue(second, second.contains("\"skills\":\"unavailable\""));
+		assertTrue(second, second.contains("\"skills\":{\"entries\":null}"));
+		assertTrue(second, second.contains("\"grandExchange\":\"unavailable\""));
+		assertTrue(second, second.contains("\"grandExchange\":{\"slots\":null}"));
+		assertTrue(second, second.contains("\"quests\":\"unavailable\""));
+		assertTrue(second, second.contains("\"quests\":{\"points\":null}"));
+		// The schema-2 half is untouched by any of it.
+		assertEquals("302", value(second, "world"));
+
+		plugin.shutDown();
+	}
+
+	/**
+	 * A running task the client will not name makes the whole slayer group unavailable, rather than
+	 * publishing the count beside a null identifier -- which is the shape that means "no task".
+	 */
+	@Test
+	public void aRunningTaskWithAnUnreadableCreatureReportsTheSlayerGroupUnavailable()
+		throws IOException
+	{
+		logInClient();
+		when(client.getVarpValue(VarPlayerID.SLAYER_COUNT)).thenReturn(42);
+		when(client.getVarpValue(VarPlayerID.SLAYER_TARGET)).thenReturn(-1);
+
+		plugin.startUp();
+		runClientThreadQueue();
+		onlyExecutor().runScheduledTaskOnce();
+
+		String json = snapshotOnDisk();
+		assertTrue(json, json.contains("\"slayer\":\"unavailable\""));
+		assertTrue(json, json.contains("\"slayer\":{\"remaining\":null,\"taskCreatureId\":null}"));
+		assertTrue("the rest of the document is unaffected", json.contains("\"loggedIn\":true"));
+		assertTrue("and every other group still answers for itself",
+			json.contains("\"quests\":\"supported\""));
+
+		plugin.shutDown();
+	}
+
+	/**
+	 * Publication runs on its own thread, so it can build a snapshot at any moment during a sample.
+	 * Whenever it does, the five schema-3 groups it finds must all come from one tick: this tick's
+	 * skills beside the previous tick's task is a sample no reading ever produced, published under a
+	 * fresh {@code emittedAt} as though it had been.
+	 *
+	 * The interleaving is driven rather than raced. The client answers the account-mode variable by
+	 * handing a real publication to another thread and waiting for it, so the publication lands at
+	 * the exact point where the groups are being read, on every run of this test.
+	 */
+	@Test
+	public void aPublicationDuringASampleNeverSeesTwoTicksAtOnce() throws Exception
+	{
+		logInClient();
+		firstSchemaThreeSample();
+
+		plugin.startUp();
+		runClientThreadQueue();
+		ControlledPublisher executor = onlyExecutor();
+		executor.runScheduledTaskOnce();
+		assertEquals("the first sample is the one on disk", 1,
+			schemaThreeSampleShownBy(snapshotOnDisk()));
+
+		// Every reading moves to the second sample, and the account-mode read -- which sits between
+		// the skills and the remaining groups -- hands a publication to another thread mid-sample.
+		secondSchemaThreeSample();
+		AtomicReference<Throwable> publisherFailure = new AtomicReference<>();
+		AtomicInteger publications = new AtomicInteger();
+		when(client.getVarbitValue(VarbitID.IRONMAN)).thenAnswer(invocation ->
+		{
+			if (publications.getAndIncrement() == 0)
+			{
+				Thread publisher = new Thread(() ->
+				{
+					try
+					{
+						executor.runScheduledTaskOnce();
+					}
+					catch (Throwable failure)
+					{
+						publisherFailure.set(failure);
+					}
+				}, "test-publisher");
+				publisher.start();
+				// The sampling thread waits, so the publication is genuinely concurrent with the
+				// sample and the ordering is still exact.
+				publisher.join();
+			}
+			return SECOND_ACCOUNT_TYPE_ID;
+		});
+
+		// A heartbeat is due, so the mid-sample publication builds a document whatever it finds.
+		elapsed += HEARTBEAT_MILLIS * 1_000_000L;
+		tick();
+
+		assertEquals("the mid-sample publication must have happened", 1, publications.get());
+		if (publisherFailure.get() != null)
+		{
+			throw new AssertionError("the mid-sample publication failed", publisherFailure.get());
+		}
+
+		String midSample = snapshotOnDisk();
+		assertEquals("a publication caught mid-sample must carry the previous whole sample",
+			1, schemaThreeSampleShownBy(midSample));
+		assertTrue("and it is a live document, not a nulled one",
+			midSample.contains("\"loggedIn\":true"));
+
+		// The sample it interrupted still lands whole.
+		elapsed += HEARTBEAT_MILLIS * 1_000_000L;
+		executor.runScheduledTaskOnce();
+		assertEquals("and the interrupted sample lands whole afterwards", 2,
+			schemaThreeSampleShownBy(snapshotOnDisk()));
+
+		plugin.shutDown();
+	}
+
+	private static final int FIRST_ACCOUNT_TYPE_ID = 1;
+
+	private static final int SECOND_ACCOUNT_TYPE_ID = 3;
+
+	/** Readings chosen so that every schema-3 group renders differently in the two samples. */
+	private void firstSchemaThreeSample()
+	{
+		schemaThreeSample(FIRST_ACCOUNT_TYPE_ID, 100_000, 231, 42, 494, 170);
+	}
+
+	private void secondSchemaThreeSample()
+	{
+		schemaThreeSample(SECOND_ACCOUNT_TYPE_ID, 200_000, 232, 43, 495, 171);
+	}
+
+	private void schemaThreeSample(int accountTypeId, int baseXp, int questPoints,
+		int slayerRemaining, int slayerCreatureId, int offerPrice)
+	{
+		for (Skill skill : exportedSkills())
+		{
+			when(client.getRealSkillLevel(skill)).thenReturn(60 + skill.ordinal());
+			when(client.getBoostedSkillLevel(skill)).thenReturn(61 + skill.ordinal());
+			when(client.getSkillExperience(skill)).thenReturn(baseXp + skill.ordinal());
+		}
+		when(client.getVarbitValue(VarbitID.IRONMAN)).thenReturn(accountTypeId);
+		when(client.getVarpValue(VarPlayerID.QP)).thenReturn(questPoints);
+		when(client.getVarpValue(VarPlayerID.SLAYER_COUNT)).thenReturn(slayerRemaining);
+		when(client.getVarpValue(VarPlayerID.SLAYER_TARGET)).thenReturn(slayerCreatureId);
+		GrandExchangeOffer buying =
+			offer(GrandExchangeOfferState.BUYING, 3001, offerPrice, 1_000, 250, 42_500);
+		when(client.getGrandExchangeOffers()).thenReturn(new GrandExchangeOffer[]{buying});
+	}
+
+	/**
+	 * Which of the two samples a document's schema-3 groups came from. Every group is read
+	 * separately and the answers must agree, so a document mixing them fails here rather than being
+	 * reported as one sample or the other.
+	 */
+	private static int schemaThreeSampleShownBy(String json)
+	{
+		List<Integer> perGroup = Arrays.asList(
+			groupSample(json, "skills",
+				"{\"skill\":\"attack\",\"level\":60,\"boostedLevel\":61,\"xp\":100000}",
+				"{\"skill\":\"attack\",\"level\":60,\"boostedLevel\":61,\"xp\":200000}"),
+			groupSample(json, "account",
+				"\"account\":{\"type\":\"ironman\",\"typeId\":1}",
+				"\"account\":{\"type\":\"hardcore_ironman\",\"typeId\":3}"),
+			groupSample(json, "quests", "\"quests\":{\"points\":231}", "\"quests\":{\"points\":232}"),
+			groupSample(json, "slayer",
+				"\"slayer\":{\"remaining\":42,\"taskCreatureId\":494}",
+				"\"slayer\":{\"remaining\":43,\"taskCreatureId\":495}"),
+			groupSample(json, "grandExchange", "\"price\":170", "\"price\":171"));
+
+		for (int group = 1; group < perGroup.size(); group++)
+		{
+			assertEquals("the schema-3 groups came from two different samples: " + json,
+				perGroup.get(0), perGroup.get(group));
+		}
+		return perGroup.get(0);
+	}
+
+	private static int groupSample(String json, String group, String first, String second)
+	{
+		boolean isFirst = json.contains(first);
+		boolean isSecond = json.contains(second);
+		assertTrue(group + " carries neither sample's reading: " + json, isFirst || isSecond);
+		assertFalse(group + " carries both samples' readings: " + json, isFirst && isSecond);
+		return isFirst ? 1 : 2;
+	}
+
+	/**
+	 * The whole point of the capability block, proved against a real written document: a logged-out
+	 * snapshot reports every schema-3 group unavailable and carries no value for any of them.
+	 */
+	@Test
+	public void aLoggedOutDocumentReportsEverySchemaThreeGroupUnavailable() throws IOException
+	{
+		logInClient();
+		giveClientReadableSkills();
+		plugin.startUp();
+		runClientThreadQueue();
+		ControlledPublisher executor = onlyExecutor();
+		executor.runScheduledTaskOnce();
+		assertTrue(snapshotOnDisk().contains("\"skills\":\"supported\""));
+
+		when(client.getGameState()).thenReturn(GameState.LOGIN_SCREEN);
+		gameState(GameState.LOGIN_SCREEN);
+		executor.runScheduledTaskOnce();
+
+		String json = snapshotOnDisk();
+		assertTrue(json, json.contains("\"capabilities\":{\"skills\":\"unavailable\","
+			+ "\"account\":\"unavailable\",\"quests\":\"unavailable\","
+			+ "\"slayer\":\"unavailable\",\"grandExchange\":\"unavailable\"}"));
+		assertTrue(json, json.contains("\"skills\":{\"entries\":null}"));
+		assertTrue(json, json.contains("\"account\":{\"type\":null,\"typeId\":null}"));
+		assertTrue(json, json.contains("\"quests\":{\"points\":null}"));
+		assertTrue(json, json.contains(
+			"\"slayer\":{\"remaining\":null,\"taskCreatureId\":null}"));
+		assertTrue(json, json.contains("\"grandExchange\":{\"slots\":null}"));
+
+		plugin.shutDown();
+	}
+
+	/**
+	 * The skills the schema exports: the client's enumeration without the aggregate sentinel, which
+	 * is not a trainable skill and whose experience is the account's total. Today the enumeration
+	 * carries no such member, so this filters nothing; it exists so that the day one returns, this
+	 * test measures the rule the plugin actually follows rather than dereferencing a null member.
+	 */
+	/**
+	 * A client whose skill arrays have been filled in. Without this the mock answers zero for every
+	 * base level, which the reader correctly refuses as the client's uninitialized reading, so a test
+	 * that wants the skill group carrying values has to say so.
+	 */
+	private void giveClientReadableSkills()
+	{
+		for (Skill skill : exportedSkills())
+		{
+			when(client.getRealSkillLevel(skill)).thenReturn(60 + skill.ordinal());
+			when(client.getBoostedSkillLevel(skill)).thenReturn(61 + skill.ordinal());
+			when(client.getSkillExperience(skill)).thenReturn(100_000 + skill.ordinal());
+		}
+	}
+
+	private static List<Skill> exportedSkills()
+	{
+		List<Skill> skills = new ArrayList<>();
+		for (Skill skill : Skill.values())
+		{
+			if (skill != null && !"OVERALL".equals(skill.name()))
+			{
+				skills.add(skill);
+			}
+		}
+		return skills;
+	}
+
+	private static GrandExchangeOffer offer(GrandExchangeOfferState state, int itemId, int price,
+		int totalQuantity, int quantitySold, int spent)
+	{
+		GrandExchangeOffer offer = mock(GrandExchangeOffer.class);
+		when(offer.getState()).thenReturn(state);
+		when(offer.getItemId()).thenReturn(itemId);
+		when(offer.getPrice()).thenReturn(price);
+		when(offer.getTotalQuantity()).thenReturn(totalQuantity);
+		when(offer.getQuantitySold()).thenReturn(quantitySold);
+		when(offer.getSpent()).thenReturn(spent);
+		return offer;
 	}
 
 	/**

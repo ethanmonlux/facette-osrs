@@ -220,6 +220,16 @@ final class TelemetryState
 	private Integer lastDelta;
 	private Long lastChangedAt;
 
+	// The schema-3 groups. Each is null until a live sample reads it and null again the moment the
+	// snapshot stops carrying player data, which is what makes every capability answer honest
+	// without anything having to remember to say so.
+	private List<TelemetrySkillState> skillStates;
+	private Integer accountTypeId;
+	private Integer questPoints;
+	private Integer slayerRemaining;
+	private Integer slayerTaskCreatureId;
+	private List<TelemetryGrandExchangeSlot> grandExchangeSlots;
+
 	TelemetryState(String instanceId, LongSupplier wallClockMillis, LongSupplier elapsedNanos)
 	{
 		this.instanceId = Objects.requireNonNull(instanceId, "instanceId");
@@ -373,6 +383,169 @@ final class TelemetryState
 		freeSlots = set(freeSlots, INVENTORY_CAPACITY - occupied);
 		inventorySlots = set(inventorySlots, next);
 		return true;
+	}
+
+	/**
+	 * Commits one already-gathered schema-3 sample as a single state transition.
+	 *
+	 * This is the only way the five schema-3 groups reach the state, and that is the point of it
+	 * rather than a convenience. Publication runs on its own thread and {@link #nextSnapshot(boolean)}
+	 * takes the same monitor, so five separately synchronized mutators would let a publication land
+	 * between two of them and emit a document carrying this tick's skills beside the previous tick's
+	 * task -- a mixture no sample ever read, published under a fresh {@code emittedAt}. Holding the
+	 * monitor across all five makes a snapshot carry the whole previous sample or the whole new one.
+	 *
+	 * The readings arrive already gathered, so nothing that talks to the game client runs while this
+	 * monitor is held. The caller reads the client on the client thread, where those reads are legal,
+	 * and hands the bounded result here.
+	 *
+	 * Each group keeps its own supported/unavailable rule: one group the client would not answer for
+	 * becomes unavailable on its own and leaves the other four carrying their values.
+	 */
+	synchronized void applySchema3Sample(
+		List<TelemetrySkillState> states,
+		int accountTypeId,
+		int questPoints,
+		int slayerRemaining,
+		int slayerTaskCreatureId,
+		List<TelemetryGrandExchangeSlot> grandExchangeSlots)
+	{
+		applySkillStates(states);
+		applyAccountType(accountTypeId);
+		applyQuestPoints(questPoints);
+		applySlayerTask(slayerRemaining, slayerTaskCreatureId);
+		applyGrandExchange(grandExchangeSlots);
+	}
+
+	/**
+	 * Records the client's own per-skill standing. Refused when the list is missing or holds a null,
+	 * so the group is either the whole reading or absent; a partial skill list would look like a
+	 * complete one to a reader.
+	 */
+	private void applySkillStates(List<TelemetrySkillState> states)
+	{
+		if (!loggedIn)
+		{
+			return;
+		}
+		if (states == null || states.contains(null))
+		{
+			clearSkillStates();
+			return;
+		}
+		skillStates = set(skillStates, Collections.unmodifiableList(new ArrayList<>(states)));
+	}
+
+	/**
+	 * Records the account mode's own reading. A negative reading is no reading: the variable has not
+	 * been populated for this session yet, and the group becomes unavailable rather than reporting
+	 * the mode a zero would name.
+	 */
+	private void applyAccountType(int typeId)
+	{
+		if (!loggedIn)
+		{
+			return;
+		}
+		if (typeId < 0)
+		{
+			accountTypeId = set(accountTypeId, null);
+			return;
+		}
+		accountTypeId = set(accountTypeId, Integer.valueOf(typeId));
+	}
+
+	private void applyQuestPoints(int points)
+	{
+		if (!loggedIn)
+		{
+			return;
+		}
+		if (points < 0)
+		{
+			questPoints = set(questPoints, null);
+			return;
+		}
+		questPoints = set(questPoints, Integer.valueOf(points));
+	}
+
+	/**
+	 * Records the slayer task, as a whole reading or not at all.
+	 *
+	 * The client reports the assigned creature only while a task is still running, so a count of zero
+	 * is the supported no-task state and clears the creature rather than leaving the last one
+	 * standing beside a finished task.
+	 *
+	 * A running task whose creature will not read is the case that has to fail closed. The count says
+	 * a task is assigned and the identifier is the only fact naming which one, so publishing the
+	 * count beside a null identifier would report a supported group that answers "some task, for
+	 * something" -- and a reader cannot tell that apart from the no-task state, which is the same two
+	 * fields with a zero in them. So the whole group clears and the capability says unavailable. The
+	 * last known creature is not held over: it names a task the client has stopped confirming.
+	 */
+	private void applySlayerTask(int remaining, int taskCreatureId)
+	{
+		if (!loggedIn)
+		{
+			return;
+		}
+		if (remaining < 0 || (remaining > 0 && taskCreatureId < 0))
+		{
+			clearSlayerTask();
+			return;
+		}
+		slayerRemaining = set(slayerRemaining, Integer.valueOf(remaining));
+		slayerTaskCreatureId =
+			set(slayerTaskCreatureId, remaining > 0 ? Integer.valueOf(taskCreatureId) : null);
+	}
+
+	private void applyGrandExchange(List<TelemetryGrandExchangeSlot> slots)
+	{
+		if (!loggedIn)
+		{
+			return;
+		}
+		if (slots == null || slots.contains(null))
+		{
+			clearGrandExchange();
+			return;
+		}
+		grandExchangeSlots =
+			set(grandExchangeSlots, Collections.unmodifiableList(new ArrayList<>(slots)));
+	}
+
+	/**
+	 * A schema-3 group whose fresh read failed becomes unavailable, rather than keeping what the
+	 * last successful read saw.
+	 *
+	 * This is deliberately the opposite of what the schema-2 fields do. There, a null reading means
+	 * "not read this tick" and the state keeps its last value, because an equipment or inventory
+	 * block that blinked to empty would read as the player having taken everything off. Those fields
+	 * have no way to say "I could not read this", so holding the last real value is the least
+	 * misleading thing available.
+	 *
+	 * The schema-3 groups do have a way to say it. Keeping a stale group would publish it as
+	 * supported beside a fresh {@code emittedAt}, which is last-known data presented as current --
+	 * the one thing the capability block promises never to do. So they clear, and the capability
+	 * says so.
+	 *
+	 * A group clears whole. Half of a reading is not a smaller reading, it is a claim the producer
+	 * cannot stand behind.
+	 */
+	private void clearSkillStates()
+	{
+		skillStates = set(skillStates, null);
+	}
+
+	private void clearSlayerTask()
+	{
+		slayerRemaining = set(slayerRemaining, null);
+		slayerTaskCreatureId = set(slayerTaskCreatureId, null);
+	}
+
+	private void clearGrandExchange()
+	{
+		grandExchangeSlots = set(grandExchangeSlots, null);
 	}
 
 	/**
@@ -646,7 +819,15 @@ final class TelemetryState
 				.combat(attackStyle, activePrayers, target)
 				.equipment(equipmentSlots)
 				.inventory(usedSlots, freeSlots, inventorySlots)
-				.xp(lastSkill, lastDelta, lastChangedAt, exportedSkillGains());
+				.xp(lastSkill, lastDelta, lastChangedAt, exportedSkillGains())
+				// Carried as they stand rather than gated on being complete. A schema-3 group the
+				// client would not answer for is reported unavailable on its own, which is the
+				// point of the capabilities: one unreadable group must not null the document.
+				.skills(skillStates)
+				.account(accountTypeId)
+				.quests(questPoints)
+				.slayer(slayerRemaining, slayerTaskCreatureId)
+				.grandExchange(grandExchangeSlots);
 		}
 		else
 		{
@@ -655,7 +836,12 @@ final class TelemetryState
 				.combat(null, null, null)
 				.equipment(null)
 				.inventory(null, null, null)
-				.xp(null, null, null, null);
+				.xp(null, null, null, null)
+				.skills(null)
+				.account(null)
+				.quests(null)
+				.slayer(null, null)
+				.grandExchange(null);
 		}
 
 		return b.build();
@@ -694,6 +880,16 @@ final class TelemetryState
 		usedSlots = set(usedSlots, null);
 		freeSlots = set(freeSlots, null);
 		inventorySlots = set(inventorySlots, null);
+
+		// The schema-3 groups go with them. Each one becomes an unavailable capability by virtue of
+		// being null, so a logged-out document reports that it has no skill totals, no account mode,
+		// no quest points, no task, and no offers, rather than showing what it last saw.
+		skillStates = set(skillStates, null);
+		accountTypeId = set(accountTypeId, null);
+		questPoints = set(questPoints, null);
+		slayerRemaining = set(slayerRemaining, null);
+		slayerTaskCreatureId = set(slayerTaskCreatureId, null);
+		grandExchangeSlots = set(grandExchangeSlots, null);
 
 		// The experience fields and the tracking stamp are left alone, because a world hop passes
 		// through here with the session intact and a gain cannot be reconstructed later. A genuine
