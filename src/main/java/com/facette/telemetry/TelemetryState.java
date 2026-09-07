@@ -386,22 +386,54 @@ final class TelemetryState
 	}
 
 	/**
+	 * Commits one already-gathered schema-3 sample as a single state transition.
+	 *
+	 * This is the only way the five schema-3 groups reach the state, and that is the point of it
+	 * rather than a convenience. Publication runs on its own thread and {@link #nextSnapshot(boolean)}
+	 * takes the same monitor, so five separately synchronized mutators would let a publication land
+	 * between two of them and emit a document carrying this tick's skills beside the previous tick's
+	 * task -- a mixture no sample ever read, published under a fresh {@code emittedAt}. Holding the
+	 * monitor across all five makes a snapshot carry the whole previous sample or the whole new one.
+	 *
+	 * The readings arrive already gathered, so nothing that talks to the game client runs while this
+	 * monitor is held. The caller reads the client on the client thread, where those reads are legal,
+	 * and hands the bounded result here.
+	 *
+	 * Each group keeps its own supported/unavailable rule: one group the client would not answer for
+	 * becomes unavailable on its own and leaves the other four carrying their values.
+	 */
+	synchronized void applySchema3Sample(
+		List<TelemetrySkillState> states,
+		int accountTypeId,
+		int questPoints,
+		int slayerRemaining,
+		int slayerTaskCreatureId,
+		List<TelemetryGrandExchangeSlot> grandExchangeSlots)
+	{
+		applySkillStates(states);
+		applyAccountType(accountTypeId);
+		applyQuestPoints(questPoints);
+		applySlayerTask(slayerRemaining, slayerTaskCreatureId);
+		applyGrandExchange(grandExchangeSlots);
+	}
+
+	/**
 	 * Records the client's own per-skill standing. Refused when the list is missing or holds a null,
 	 * so the group is either the whole reading or absent; a partial skill list would look like a
 	 * complete one to a reader.
 	 */
-	synchronized boolean updateSkillStates(List<TelemetrySkillState> states)
+	private void applySkillStates(List<TelemetrySkillState> states)
 	{
 		if (!loggedIn)
 		{
-			return false;
+			return;
 		}
 		if (states == null || states.contains(null))
 		{
-			return clearSkillStates();
+			clearSkillStates();
+			return;
 		}
 		skillStates = set(skillStates, Collections.unmodifiableList(new ArrayList<>(states)));
-		return true;
 	}
 
 	/**
@@ -409,70 +441,77 @@ final class TelemetryState
 	 * been populated for this session yet, and the group becomes unavailable rather than reporting
 	 * the mode a zero would name.
 	 */
-	synchronized boolean updateAccountType(int typeId)
+	private void applyAccountType(int typeId)
 	{
 		if (!loggedIn)
 		{
-			return false;
+			return;
 		}
 		if (typeId < 0)
 		{
 			accountTypeId = set(accountTypeId, null);
-			return false;
+			return;
 		}
 		accountTypeId = set(accountTypeId, Integer.valueOf(typeId));
-		return true;
 	}
 
-	synchronized boolean updateQuestPoints(int points)
+	private void applyQuestPoints(int points)
 	{
 		if (!loggedIn)
 		{
-			return false;
+			return;
 		}
 		if (points < 0)
 		{
 			questPoints = set(questPoints, null);
-			return false;
+			return;
 		}
 		questPoints = set(questPoints, Integer.valueOf(points));
-		return true;
 	}
 
 	/**
-	 * Records the slayer task. The client reports the assigned creature only while a task is still
-	 * running, so a count of zero clears the creature rather than leaving the last one standing
-	 * beside a finished task.
+	 * Records the slayer task, as a whole reading or not at all.
+	 *
+	 * The client reports the assigned creature only while a task is still running, so a count of zero
+	 * is the supported no-task state and clears the creature rather than leaving the last one
+	 * standing beside a finished task.
+	 *
+	 * A running task whose creature will not read is the case that has to fail closed. The count says
+	 * a task is assigned and the identifier is the only fact naming which one, so publishing the
+	 * count beside a null identifier would report a supported group that answers "some task, for
+	 * something" -- and a reader cannot tell that apart from the no-task state, which is the same two
+	 * fields with a zero in them. So the whole group clears and the capability says unavailable. The
+	 * last known creature is not held over: it names a task the client has stopped confirming.
 	 */
-	synchronized boolean updateSlayerTask(int remaining, int taskCreatureId)
+	private void applySlayerTask(int remaining, int taskCreatureId)
 	{
 		if (!loggedIn)
 		{
-			return false;
+			return;
 		}
-		if (remaining < 0)
+		if (remaining < 0 || (remaining > 0 && taskCreatureId < 0))
 		{
-			return clearSlayerTask();
+			clearSlayerTask();
+			return;
 		}
 		slayerRemaining = set(slayerRemaining, Integer.valueOf(remaining));
-		slayerTaskCreatureId = set(slayerTaskCreatureId,
-			remaining > 0 && taskCreatureId >= 0 ? Integer.valueOf(taskCreatureId) : null);
-		return true;
+		slayerTaskCreatureId =
+			set(slayerTaskCreatureId, remaining > 0 ? Integer.valueOf(taskCreatureId) : null);
 	}
 
-	synchronized boolean updateGrandExchange(List<TelemetryGrandExchangeSlot> slots)
+	private void applyGrandExchange(List<TelemetryGrandExchangeSlot> slots)
 	{
 		if (!loggedIn)
 		{
-			return false;
+			return;
 		}
 		if (slots == null || slots.contains(null))
 		{
-			return clearGrandExchange();
+			clearGrandExchange();
+			return;
 		}
 		grandExchangeSlots =
 			set(grandExchangeSlots, Collections.unmodifiableList(new ArrayList<>(slots)));
-		return true;
 	}
 
 	/**
@@ -490,25 +529,23 @@ final class TelemetryState
 	 * the one thing the capability block promises never to do. So they clear, and the capability
 	 * says so.
 	 *
-	 * Each returns false, because the caller's question is "did this read land", and it did not.
+	 * A group clears whole. Half of a reading is not a smaller reading, it is a claim the producer
+	 * cannot stand behind.
 	 */
-	private boolean clearSkillStates()
+	private void clearSkillStates()
 	{
 		skillStates = set(skillStates, null);
-		return false;
 	}
 
-	private boolean clearSlayerTask()
+	private void clearSlayerTask()
 	{
 		slayerRemaining = set(slayerRemaining, null);
 		slayerTaskCreatureId = set(slayerTaskCreatureId, null);
-		return false;
 	}
 
-	private boolean clearGrandExchange()
+	private void clearGrandExchange()
 	{
 		grandExchangeSlots = set(grandExchangeSlots, null);
-		return false;
 	}
 
 	/**

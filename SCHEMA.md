@@ -310,6 +310,16 @@ The client reports the assigned creature only while a task is running, so **`tas
 `null` whenever `remaining` is `0`**. A `remaining` of `0` is a supported answer — "no task" — not an
 unavailable group.
 
+**In a `supported` group, a `null` `taskCreatureId` therefore means "no task".** A running task whose
+creature will not read makes the whole group unavailable, with both fields `null`, rather than
+publishing the count on its own: the identifier is the only fact naming which task is running, and a
+count beside a null identifier would be indistinguishable from the no-task state a reader is meant to
+recognize. So a `supported` slayer group with `remaining` above `0` always carries an identifier.
+
+Read the capability first. An `unavailable` slayer group also carries `null` in both fields, and
+those nulls say nothing about whether a task exists — reading one as "no task" is the mistake this
+group is shaped to prevent.
+
 **No task name is exported.** The client has no stable first-party mapping from the creature
 identifier to a name, and the only other route to one is reading the chat, which this plugin does
 not do. The identifier is the trustworthy fact; naming it belongs to the reader.

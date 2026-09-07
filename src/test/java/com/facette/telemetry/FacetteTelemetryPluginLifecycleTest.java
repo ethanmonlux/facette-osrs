@@ -37,6 +37,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
@@ -1367,6 +1368,178 @@ public class FacetteTelemetryPluginLifecycleTest
 		assertEquals("302", value(second, "world"));
 
 		plugin.shutDown();
+	}
+
+	/**
+	 * A running task the client will not name makes the whole slayer group unavailable, rather than
+	 * publishing the count beside a null identifier -- which is the shape that means "no task".
+	 */
+	@Test
+	public void aRunningTaskWithAnUnreadableCreatureReportsTheSlayerGroupUnavailable()
+		throws IOException
+	{
+		logInClient();
+		when(client.getVarpValue(VarPlayerID.SLAYER_COUNT)).thenReturn(42);
+		when(client.getVarpValue(VarPlayerID.SLAYER_TARGET)).thenReturn(-1);
+
+		plugin.startUp();
+		runClientThreadQueue();
+		onlyExecutor().runScheduledTaskOnce();
+
+		String json = snapshotOnDisk();
+		assertTrue(json, json.contains("\"slayer\":\"unavailable\""));
+		assertTrue(json, json.contains("\"slayer\":{\"remaining\":null,\"taskCreatureId\":null}"));
+		assertTrue("the rest of the document is unaffected", json.contains("\"loggedIn\":true"));
+		assertTrue("and every other group still answers for itself",
+			json.contains("\"quests\":\"supported\""));
+
+		plugin.shutDown();
+	}
+
+	/**
+	 * Publication runs on its own thread, so it can build a snapshot at any moment during a sample.
+	 * Whenever it does, the five schema-3 groups it finds must all come from one tick: this tick's
+	 * skills beside the previous tick's task is a sample no reading ever produced, published under a
+	 * fresh {@code emittedAt} as though it had been.
+	 *
+	 * The interleaving is driven rather than raced. The client answers the account-mode variable by
+	 * handing a real publication to another thread and waiting for it, so the publication lands at
+	 * the exact point where the groups are being read, on every run of this test.
+	 */
+	@Test
+	public void aPublicationDuringASampleNeverSeesTwoTicksAtOnce() throws Exception
+	{
+		logInClient();
+		firstSchemaThreeSample();
+
+		plugin.startUp();
+		runClientThreadQueue();
+		ControlledPublisher executor = onlyExecutor();
+		executor.runScheduledTaskOnce();
+		assertEquals("the first sample is the one on disk", 1,
+			schemaThreeSampleShownBy(snapshotOnDisk()));
+
+		// Every reading moves to the second sample, and the account-mode read -- which sits between
+		// the skills and the remaining groups -- hands a publication to another thread mid-sample.
+		secondSchemaThreeSample();
+		AtomicReference<Throwable> publisherFailure = new AtomicReference<>();
+		AtomicInteger publications = new AtomicInteger();
+		when(client.getVarbitValue(VarbitID.IRONMAN)).thenAnswer(invocation ->
+		{
+			if (publications.getAndIncrement() == 0)
+			{
+				Thread publisher = new Thread(() ->
+				{
+					try
+					{
+						executor.runScheduledTaskOnce();
+					}
+					catch (Throwable failure)
+					{
+						publisherFailure.set(failure);
+					}
+				}, "test-publisher");
+				publisher.start();
+				// The sampling thread waits, so the publication is genuinely concurrent with the
+				// sample and the ordering is still exact.
+				publisher.join();
+			}
+			return SECOND_ACCOUNT_TYPE_ID;
+		});
+
+		// A heartbeat is due, so the mid-sample publication builds a document whatever it finds.
+		elapsed += HEARTBEAT_MILLIS * 1_000_000L;
+		tick();
+
+		assertEquals("the mid-sample publication must have happened", 1, publications.get());
+		if (publisherFailure.get() != null)
+		{
+			throw new AssertionError("the mid-sample publication failed", publisherFailure.get());
+		}
+
+		String midSample = snapshotOnDisk();
+		assertEquals("a publication caught mid-sample must carry the previous whole sample",
+			1, schemaThreeSampleShownBy(midSample));
+		assertTrue("and it is a live document, not a nulled one",
+			midSample.contains("\"loggedIn\":true"));
+
+		// The sample it interrupted still lands whole.
+		elapsed += HEARTBEAT_MILLIS * 1_000_000L;
+		executor.runScheduledTaskOnce();
+		assertEquals("and the interrupted sample lands whole afterwards", 2,
+			schemaThreeSampleShownBy(snapshotOnDisk()));
+
+		plugin.shutDown();
+	}
+
+	private static final int FIRST_ACCOUNT_TYPE_ID = 1;
+
+	private static final int SECOND_ACCOUNT_TYPE_ID = 3;
+
+	/** Readings chosen so that every schema-3 group renders differently in the two samples. */
+	private void firstSchemaThreeSample()
+	{
+		schemaThreeSample(FIRST_ACCOUNT_TYPE_ID, 100_000, 231, 42, 494, 170);
+	}
+
+	private void secondSchemaThreeSample()
+	{
+		schemaThreeSample(SECOND_ACCOUNT_TYPE_ID, 200_000, 232, 43, 495, 171);
+	}
+
+	private void schemaThreeSample(int accountTypeId, int baseXp, int questPoints,
+		int slayerRemaining, int slayerCreatureId, int offerPrice)
+	{
+		for (Skill skill : exportedSkills())
+		{
+			when(client.getRealSkillLevel(skill)).thenReturn(60 + skill.ordinal());
+			when(client.getBoostedSkillLevel(skill)).thenReturn(61 + skill.ordinal());
+			when(client.getSkillExperience(skill)).thenReturn(baseXp + skill.ordinal());
+		}
+		when(client.getVarbitValue(VarbitID.IRONMAN)).thenReturn(accountTypeId);
+		when(client.getVarpValue(VarPlayerID.QP)).thenReturn(questPoints);
+		when(client.getVarpValue(VarPlayerID.SLAYER_COUNT)).thenReturn(slayerRemaining);
+		when(client.getVarpValue(VarPlayerID.SLAYER_TARGET)).thenReturn(slayerCreatureId);
+		GrandExchangeOffer buying =
+			offer(GrandExchangeOfferState.BUYING, 3001, offerPrice, 1_000, 250, 42_500);
+		when(client.getGrandExchangeOffers()).thenReturn(new GrandExchangeOffer[]{buying});
+	}
+
+	/**
+	 * Which of the two samples a document's schema-3 groups came from. Every group is read
+	 * separately and the answers must agree, so a document mixing them fails here rather than being
+	 * reported as one sample or the other.
+	 */
+	private static int schemaThreeSampleShownBy(String json)
+	{
+		List<Integer> perGroup = Arrays.asList(
+			groupSample(json, "skills",
+				"{\"skill\":\"attack\",\"level\":60,\"boostedLevel\":61,\"xp\":100000}",
+				"{\"skill\":\"attack\",\"level\":60,\"boostedLevel\":61,\"xp\":200000}"),
+			groupSample(json, "account",
+				"\"account\":{\"type\":\"ironman\",\"typeId\":1}",
+				"\"account\":{\"type\":\"hardcore_ironman\",\"typeId\":3}"),
+			groupSample(json, "quests", "\"quests\":{\"points\":231}", "\"quests\":{\"points\":232}"),
+			groupSample(json, "slayer",
+				"\"slayer\":{\"remaining\":42,\"taskCreatureId\":494}",
+				"\"slayer\":{\"remaining\":43,\"taskCreatureId\":495}"),
+			groupSample(json, "grandExchange", "\"price\":170", "\"price\":171"));
+
+		for (int group = 1; group < perGroup.size(); group++)
+		{
+			assertEquals("the schema-3 groups came from two different samples: " + json,
+				perGroup.get(0), perGroup.get(group));
+		}
+		return perGroup.get(0);
+	}
+
+	private static int groupSample(String json, String group, String first, String second)
+	{
+		boolean isFirst = json.contains(first);
+		boolean isSecond = json.contains(second);
+		assertTrue(group + " carries neither sample's reading: " + json, isFirst || isSecond);
+		assertFalse(group + " carries both samples' readings: " + json, isFirst && isSecond);
+		return isFirst ? 1 : 2;
 	}
 
 	/**

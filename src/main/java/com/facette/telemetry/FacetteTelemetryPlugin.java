@@ -404,13 +404,21 @@ public class FacetteTelemetryPlugin extends Plugin
 		// Schema 3, read after the completeness mark on purpose. These groups answer for themselves
 		// through the document's capabilities, so one of them failing to read leaves the rest of the
 		// snapshot valid instead of nulling a player's whole document.
-		state.updateSkillStates(readSkillStates());
-		state.updateAccountType(client.getVarbitValue(VarbitID.IRONMAN));
-		state.updateQuestPoints(client.getVarpValue(VarPlayerID.QP));
-		state.updateSlayerTask(
-			client.getVarpValue(VarPlayerID.SLAYER_COUNT),
-			client.getVarpValue(VarPlayerID.SLAYER_TARGET));
-		state.updateGrandExchange(readGrandExchangeSlots());
+		//
+		// Read first, committed second, and the split is the point. Publication runs on another
+		// thread, so committing group by group would let a snapshot be built between two of them and
+		// carry this tick's skills beside the previous tick's task -- a sample no tick ever read,
+		// dated as though it had been. Every client read happens here, on the client thread and
+		// outside the state's monitor, and the gathered result is committed as one transition.
+		List<TelemetrySkillState> skillStates = readSkillStates();
+		int accountTypeId = client.getVarbitValue(VarbitID.IRONMAN);
+		int questPoints = client.getVarpValue(VarPlayerID.QP);
+		int slayerRemaining = client.getVarpValue(VarPlayerID.SLAYER_COUNT);
+		int slayerTaskCreatureId = client.getVarpValue(VarPlayerID.SLAYER_TARGET);
+		List<TelemetryGrandExchangeSlot> grandExchangeSlots = readGrandExchangeSlots();
+
+		state.applySchema3Sample(skillStates, accountTypeId, questPoints, slayerRemaining,
+			slayerTaskCreatureId, grandExchangeSlots);
 	}
 
 	/**
