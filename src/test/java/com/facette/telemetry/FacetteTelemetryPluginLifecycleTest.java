@@ -1261,6 +1261,32 @@ public class FacetteTelemetryPluginLifecycleTest
 	}
 
 	/**
+	 * The client reports an offer's price and coins spent as longs. A reading past the int range is
+	 * a real figure and reaches the file exactly as the client gave it: not wrapped, not clamped, and
+	 * not turned into an unavailable slot merely for being large.
+	 */
+	@Test
+	public void anOfferPriceAndSpendBeyondTheIntRangeReachTheFileExactly() throws IOException
+	{
+		logInClient();
+		GrandExchangeOffer selling =
+			offer(GrandExchangeOfferState.SELLING, 3001, 3_000_000_000L, 2, 1, 4_294_967_466L);
+		when(client.getGrandExchangeOffers()).thenReturn(new GrandExchangeOffer[]{selling});
+
+		plugin.startUp();
+		runClientThreadQueue();
+		onlyExecutor().runScheduledTaskOnce();
+
+		String json = snapshotOnDisk();
+		assertTrue(json, json.contains("\"grandExchange\":{\"slots\":["
+			+ "{\"slot\":0,\"state\":\"selling\",\"itemId\":3001,\"price\":3000000000,"
+			+ "\"totalQuantity\":2,\"quantityTransacted\":1,\"spent\":4294967466}]}"));
+		assertTrue(json, json.contains("\"grandExchange\":\"supported\""));
+
+		plugin.shutDown();
+	}
+
+	/**
 	 * A client with no offer array to give is an unavailable group, not an empty one. "No offers"
 	 * and "could not read the offers" are different answers and a reader has to be able to tell.
 	 */
@@ -1609,8 +1635,8 @@ public class FacetteTelemetryPluginLifecycleTest
 		return skills;
 	}
 
-	private static GrandExchangeOffer offer(GrandExchangeOfferState state, int itemId, int price,
-		int totalQuantity, int quantitySold, int spent)
+	private static GrandExchangeOffer offer(GrandExchangeOfferState state, int itemId, long price,
+		int totalQuantity, int quantitySold, long spent)
 	{
 		GrandExchangeOffer offer = mock(GrandExchangeOffer.class);
 		when(offer.getState()).thenReturn(state);

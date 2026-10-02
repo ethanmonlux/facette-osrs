@@ -717,6 +717,61 @@ public class TelemetrySnapshotTest
 			+ "\"price\":null,\"totalQuantity\":null,\"quantityTransacted\":null,\"spent\":null}"));
 	}
 
+	/**
+	 * Price and coins spent are the client's long readings. Values past the int range are written
+	 * as the exact integers they are; 4294967466 is 2^32 + 170, which a narrowing cast would turn
+	 * into a believable 170.
+	 */
+	@Test
+	public void anOfferPriceAndSpendBeyondTheIntRangeAreWrittenExactly()
+	{
+		String json = offersOf(
+			TelemetryGrandExchangeSlot.offer("buying", 3001, 4_294_967_466L, 3, 2, 8_589_934_932L),
+			TelemetryGrandExchangeSlot.offer(
+				"selling", 3002, Long.MAX_VALUE, 1, 1, Long.MAX_VALUE));
+		assertTrue(json, json.contains("{\"slot\":0,\"state\":\"buying\",\"itemId\":3001,"
+			+ "\"price\":4294967466,\"totalQuantity\":3,\"quantityTransacted\":2,"
+			+ "\"spent\":8589934932}"));
+		assertTrue(json, json.contains("{\"slot\":1,\"state\":\"selling\",\"itemId\":3002,"
+			+ "\"price\":9223372036854775807,\"totalQuantity\":1,\"quantityTransacted\":1,"
+			+ "\"spent\":9223372036854775807}"));
+	}
+
+	/**
+	 * A negative price or spend is still impossible when it lies past the int range. Both of these
+	 * have low 32 bits that read as a small positive number, so only a check made on the whole
+	 * reading refuses them.
+	 */
+	@Test
+	public void aNegativePriceOrSpendBeyondTheIntRangeIsNotExportedAsAnOffer()
+	{
+		String json = offersOf(
+			TelemetryGrandExchangeSlot.offer("buying", 3001, -4_294_967_126L, 10, 1, 170),
+			TelemetryGrandExchangeSlot.offer("buying", 3001, 170, 10, 1, -4_294_967_126L));
+		String unavailable = "\"state\":null,\"itemId\":null,\"price\":null,"
+			+ "\"totalQuantity\":null,\"quantityTransacted\":null,\"spent\":null}";
+		assertTrue(json, json.contains("{\"slot\":0," + unavailable));
+		assertTrue(json, json.contains("{\"slot\":1," + unavailable));
+	}
+
+	/**
+	 * Offers that differ only past the int range are different offers, or a change there would not
+	 * rewrite the file.
+	 */
+	@Test
+	public void offersDifferingOnlyBeyondTheIntRangeAreNotEqual()
+	{
+		TelemetryGrandExchangeSlot low =
+			TelemetryGrandExchangeSlot.offer("buying", 3001, 170, 3, 2, 340);
+		assertFalse(low.equals(
+			TelemetryGrandExchangeSlot.offer("buying", 3001, 4_294_967_466L, 3, 2, 340)));
+		assertFalse(low.equals(
+			TelemetryGrandExchangeSlot.offer("buying", 3001, 170, 3, 2, 4_294_967_636L)));
+		assertEquals(low, TelemetryGrandExchangeSlot.offer("buying", 3001, 170L, 3, 2, 340L));
+		assertEquals(low.hashCode(),
+			TelemetryGrandExchangeSlot.offer("buying", 3001, 170L, 3, 2, 340L).hashCode());
+	}
+
 	@Test
 	public void anOfferPriceAppearsOnlyInsideTheGrandExchangeSlots()
 	{
@@ -925,7 +980,7 @@ public class TelemetrySnapshotTest
 		{
 			maxOffers.add(TelemetryGrandExchangeSlot.offer(
 				repeat('O', TelemetrySnapshot.MAX_OFFER_STATE_CHARS), Integer.MAX_VALUE,
-				Integer.MAX_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE));
+				Long.MAX_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE, Long.MAX_VALUE));
 		}
 
 		TelemetrySnapshot largest = TelemetrySnapshot.builder()
