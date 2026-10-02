@@ -46,13 +46,13 @@ final class TelemetryGrandExchangeSlot
 
 	private final String state;
 	private final Integer itemId;
-	private final Integer price;
+	private final Long price;
 	private final Integer totalQuantity;
 	private final Integer quantityTransacted;
-	private final Integer spent;
+	private final Long spent;
 
-	private TelemetryGrandExchangeSlot(String state, Integer itemId, Integer price,
-		Integer totalQuantity, Integer quantityTransacted, Integer spent)
+	private TelemetryGrandExchangeSlot(String state, Integer itemId, Long price,
+		Integer totalQuantity, Integer quantityTransacted, Long spent)
 	{
 		this.state = state;
 		this.itemId = itemId;
@@ -73,9 +73,12 @@ final class TelemetryGrandExchangeSlot
 	 * A slot holding an offer. A reading the client cannot sensibly report for a live offer — a
 	 * negative item, price, or quantity, or a transacted quantity larger than the whole offer —
 	 * makes this an unavailable slot rather than a slot carrying a number nobody should trust.
+	 *
+	 * Price and spent are longs because the client reports them as longs. They are kept whole: a
+	 * figure past the int range is a real reading, not one to clamp, wrap, or call unavailable.
 	 */
-	static TelemetryGrandExchangeSlot offer(String state, int itemId, int price, int totalQuantity,
-		int quantityTransacted, int spent)
+	static TelemetryGrandExchangeSlot offer(String state, int itemId, long price, int totalQuantity,
+		int quantityTransacted, long spent)
 	{
 		Objects.requireNonNull(state, "state");
 		if (itemId < 0 || price < 0 || totalQuantity <= 0 || quantityTransacted < 0 || spent < 0
@@ -97,7 +100,7 @@ final class TelemetryGrandExchangeSlot
 		return itemId;
 	}
 
-	Integer getPrice()
+	Long getPrice()
 	{
 		return price;
 	}
@@ -112,7 +115,7 @@ final class TelemetryGrandExchangeSlot
 		return quantityTransacted;
 	}
 
-	Integer getSpent()
+	Long getSpent()
 	{
 		return spent;
 	}
