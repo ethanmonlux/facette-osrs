@@ -598,6 +598,15 @@ final class TelemetryState
 		{
 			return false;
 		}
+		if (totalXp == 0)
+		{
+			// The same rule the event paths follow. The first live sample can land before the login
+			// experience sync has filled in the client's arrays, and a zero baseline would turn that
+			// sync's arrival into a gain the size of the skill's whole lifetime total. The skill is
+			// left without a baseline, so its next non-zero observation claims one and reports
+			// nothing; retained evidence the live client cannot confirm is dropped with it.
+			return false;
+		}
 
 		// The baseline always ends at the trusted live total, whatever the retained evidence said.
 		xpBaselines.put(skill, totalXp);

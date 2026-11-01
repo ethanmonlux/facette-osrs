@@ -368,7 +368,8 @@ public class FacetteTelemetryPlugin extends Plugin
 		}
 
 		// The first live sample of a session establishes its baselines. Reading on a tick rather
-		// than on the logged-in transition means a transient zero cannot become one.
+		// than on the logged-in transition narrows the window in which the client's totals are
+		// still zero, and the state refuses a zero baseline for the case where it has not closed.
 		if (state.needsXpBaselineSeeding())
 		{
 			seedXpBaselines(state);
