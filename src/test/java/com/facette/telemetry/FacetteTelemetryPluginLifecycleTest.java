@@ -756,6 +756,475 @@ public class FacetteTelemetryPluginLifecycleTest
 		plugin.shutDown();
 	}
 
+	// --- 9a. session experience truth --------------------------------------------------------
+
+	/** The exported session gains, {@code xp.skills}, exactly as written. */
+	private static String sessionGains(String json)
+	{
+		return value(value(json, "xp"), "skills");
+	}
+
+	/** What a reader computes as session experience: the sum of every exported {@code gained}. */
+	private static int sessionTotal(String json)
+	{
+		String gains = sessionGains(json);
+		int total = 0;
+		int at = gains.indexOf("\"gained\":");
+		while (at >= 0)
+		{
+			int start = at + "\"gained\":".length();
+			int end = start;
+			while (end < gains.length() && Character.isDigit(gains.charAt(end)))
+			{
+				end++;
+			}
+			total += Integer.parseInt(gains.substring(start, end));
+			at = gains.indexOf("\"gained\":", end);
+		}
+		return total;
+	}
+
+	private static String gainEntry(String skill, int gained, int lastDelta)
+	{
+		return "{\"skill\":\"" + skill + "\",\"gained\":" + gained + ",\"lastDelta\":" + lastDelta + ",";
+	}
+
+	private void clientTotal(Skill skill, int totalXp)
+	{
+		when(client.getSkillExperience(skill)).thenReturn(totalXp);
+	}
+
+	/**
+	 * The poisoned-session shape: millions of "session" experience per skill within minutes. The first
+	 * live sample can land before the login experience sync has filled in the client's arrays, so the
+	 * seed reads zero, and the sync that follows carries each skill's lifetime total. A zero seed would
+	 * export those lifetime totals as gains. They must stay out of {@code xp}, and the next real gain
+	 * must be measured against the synced total.
+	 */
+	@Test
+	public void aZeroReadingAtTheSeedingTickCannotTurnTheLoginExperienceSyncIntoAGain()
+		throws IOException
+	{
+		when(client.getGameState()).thenReturn(GameState.LOADING);
+		plugin.startUp();
+		runClientThreadQueue();
+		ControlledPublisher executor = onlyExecutor();
+
+		// Live, but every skill still reads zero: the sync has not arrived.
+		logInClient();
+		gameState(GameState.LOGGED_IN);
+		tick();
+		executor.runScheduledTaskOnce();
+		assertEquals("[]", sessionGains(snapshotOnDisk()));
+
+		// The login sync lands with lifetime totals, and the arrays now hold them.
+		now = 1_770_000_001_000L;
+		statChanged(Skill.FARMING, 13_165_057);
+		statChanged(Skill.ATTACK, 13_034_431);
+		clientTotal(Skill.FARMING, 13_165_057);
+		clientTotal(Skill.ATTACK, 13_034_431);
+		tick();
+		// Nothing changed, so a heartbeat is what proves the document was rewritten.
+		elapsed += TimeUnit.MILLISECONDS.toNanos(HEARTBEAT_MILLIS);
+		executor.runScheduledTaskOnce();
+		String synced = snapshotOnDisk();
+		assertEquals("lifetime totals must never be reported as session gain", "[]",
+			sessionGains(synced));
+		assertEquals("null", value(synced, "lastSkill"));
+		assertEquals(0, sessionTotal(synced));
+
+		// The next genuine gain is measured against the synced total, once.
+		now = 1_770_000_005_000L;
+		statChanged(Skill.FARMING, 13_165_100);
+		executor.runScheduledTaskOnce();
+		String json = snapshotOnDisk();
+		assertEquals("[" + gainEntry("farming", 43, 43) + "\"lastChangedAt\":1770000005000}]",
+			sessionGains(json));
+		assertEquals(43, sessionTotal(json));
+
+		plugin.shutDown();
+	}
+
+	/**
+	 * Experience retained while startup was queued, then contradicted by a live reading of zero. The
+	 * live client is not confirming anything, so the retained evidence is dropped rather than letting a
+	 * zero baseline stand, and the following sync of the same total is not a gain.
+	 */
+	@Test
+	public void retainedStartupExperienceCannotBeMeasuredAgainstAZeroLiveReading() throws IOException
+	{
+		logInClient();
+		plugin.startUp();
+
+		statChanged(Skill.FARMING, 13_165_000);
+		statChanged(Skill.FARMING, 13_165_057);
+
+		// Startup runs while the client's farming total still reads zero.
+		runClientThreadQueue();
+		ControlledPublisher executor = onlyExecutor();
+		executor.runScheduledTaskOnce();
+		assertEquals("[]", sessionGains(snapshotOnDisk()));
+
+		// The client then reports the total the retained evidence already named.
+		statChanged(Skill.FARMING, 13_165_057);
+		clientTotal(Skill.FARMING, 13_165_057);
+		tick();
+		// Nothing changed, so a heartbeat is what proves the document was rewritten.
+		elapsed += TimeUnit.MILLISECONDS.toNanos(HEARTBEAT_MILLIS);
+		executor.runScheduledTaskOnce();
+		assertEquals("[]", sessionGains(snapshotOnDisk()));
+
+		statChanged(Skill.FARMING, 13_165_145);
+		executor.runScheduledTaskOnce();
+		String json = snapshotOnDisk();
+		assertTrue(json, sessionGains(json).startsWith("[" + gainEntry("farming", 88, 88)));
+		assertEquals(88, sessionTotal(json));
+
+		plugin.shutDown();
+	}
+
+	/**
+	 * The clean-reset counterexample observed live: after a genuine logout and login, session
+	 * experience starts at zero, then reads 352 and 703 from guard combat, and the per-skill rows sum
+	 * to exactly the total each time. Run here through a login whose first tick still reads zero.
+	 */
+	@Test
+	public void aGenuineLogoutAndLoginStartsAtZeroAndCombatGainsSumExactlyAcrossSkills()
+		throws IOException
+	{
+		Skill[] combat = {Skill.ATTACK, Skill.DEFENCE, Skill.STRENGTH, Skill.HITPOINTS};
+		int[] totals = {1_210_421, 1_100_000, 1_500_000, 1_800_000};
+
+		logInClient();
+		for (int i = 0; i < combat.length; i++)
+		{
+			clientTotal(combat[i], totals[i]);
+		}
+		plugin.startUp();
+		runClientThreadQueue();
+		ControlledPublisher executor = onlyExecutor();
+		statChanged(Skill.ATTACK, totals[0] + 40);
+		totals[0] += 40;
+		executor.runScheduledTaskOnce();
+		assertEquals(40, sessionTotal(snapshotOnDisk()));
+
+		// Log out.
+		when(client.getGameState()).thenReturn(GameState.LOGIN_SCREEN);
+		gameState(GameState.LOGIN_SCREEN);
+		executor.runScheduledTaskOnce();
+		assertEquals("null", value(value(snapshotOnDisk(), "xp"), "skills"));
+
+		// Log back in. The arrays read zero until the sync, which then replays every total.
+		gameState(GameState.LOGGING_IN);
+		for (Skill skill : combat)
+		{
+			clientTotal(skill, 0);
+		}
+		now = 1_770_000_100_000L;
+		logInClient();
+		gameState(GameState.LOGGED_IN);
+		tick();
+		for (int i = 0; i < combat.length; i++)
+		{
+			statChanged(combat[i], totals[i]);
+			clientTotal(combat[i], totals[i]);
+		}
+		now = 1_770_000_121_000L;
+		tick();
+		executor.runScheduledTaskOnce();
+		String fresh = snapshotOnDisk();
+		assertEquals("[]", sessionGains(fresh));
+		assertEquals(0, sessionTotal(fresh));
+		assertEquals("tracking restarts with the new session", "1770000100000",
+			value(fresh, "trackingStartedAt"));
+
+		// 00:01:05: four combat skills, +88 each.
+		now = 1_770_000_165_000L;
+		for (int i = 0; i < combat.length; i++)
+		{
+			totals[i] += 88;
+			statChanged(combat[i], totals[i]);
+		}
+		executor.runScheduledTaskOnce();
+		String first = snapshotOnDisk();
+		assertEquals(352, sessionTotal(first));
+		for (Skill skill : combat)
+		{
+			assertTrue(first, first.contains(gainEntry(skill.name().toLowerCase(Locale.ROOT), 88, 88)));
+		}
+
+		// 00:02:06: +88, +88, +87, +88.
+		now = 1_770_000_226_000L;
+		int[] second = {88, 88, 87, 88};
+		for (int i = 0; i < combat.length; i++)
+		{
+			totals[i] += second[i];
+			statChanged(combat[i], totals[i]);
+		}
+		executor.runScheduledTaskOnce();
+		String later = snapshotOnDisk();
+		assertEquals(703, sessionTotal(later));
+		assertTrue(later, later.contains(gainEntry("attack", 176, 88)));
+		assertTrue(later, later.contains(gainEntry("defence", 176, 88)));
+		assertTrue(later, later.contains(gainEntry("strength", 175, 87)));
+		assertTrue(later, later.contains(gainEntry("hitpoints", 176, 88)));
+
+		plugin.shutDown();
+	}
+
+	/**
+	 * A hop reconnects: the client can read zero mid-hop and replays its totals afterwards. Neither may
+	 * move the session's gains, which survive the hop unchanged.
+	 */
+	@Test
+	public void aWorldHopsTransientZerosAndExperienceReplayFabricateNoGain() throws IOException
+	{
+		logInClient();
+		clientTotal(Skill.WOODCUTTING, 1_000);
+		clientTotal(Skill.FARMING, 13_165_057);
+		plugin.startUp();
+		runClientThreadQueue();
+		ControlledPublisher executor = onlyExecutor();
+		statChanged(Skill.WOODCUTTING, 1_065);
+		executor.runScheduledTaskOnce();
+		assertEquals(65, sessionTotal(snapshotOnDisk()));
+
+		when(client.getGameState()).thenReturn(GameState.HOPPING);
+		gameState(GameState.HOPPING);
+		statChanged(Skill.WOODCUTTING, 0);
+		statChanged(Skill.FARMING, 0);
+		when(client.getGameState()).thenReturn(GameState.LOADING);
+		gameState(GameState.LOADING);
+		tick();
+		executor.runScheduledTaskOnce();
+
+		logInClient();
+		gameState(GameState.LOGGED_IN);
+		statChanged(Skill.WOODCUTTING, 1_065);
+		statChanged(Skill.FARMING, 13_165_057);
+		tick();
+		executor.runScheduledTaskOnce();
+		String afterHop = snapshotOnDisk();
+		assertEquals("true", value(afterHop, "loggedIn"));
+		assertEquals(65, sessionTotal(afterHop));
+		assertFalse(afterHop, sessionGains(afterHop).contains("farming"));
+
+		statChanged(Skill.WOODCUTTING, 1_100);
+		executor.runScheduledTaskOnce();
+		String json = snapshotOnDisk();
+		assertTrue(json, json.contains(gainEntry("woodcutting", 100, 35)));
+		assertEquals(100, sessionTotal(json));
+
+		plugin.shutDown();
+	}
+
+	/**
+	 * A restart (disable and enable, or a plugin update) while logged in is a new tracked session: it
+	 * seeds from the live totals and inherits nothing from the run before it.
+	 */
+	@Test
+	public void restartingWhileLoggedInStartsAFreshSessionFromTheLiveTotals() throws IOException
+	{
+		logInClient();
+		clientTotal(Skill.THIEVING, 1_000);
+		plugin.startUp();
+		runClientThreadQueue();
+		statChanged(Skill.THIEVING, 1_046);
+		onlyExecutor().runScheduledTaskOnce();
+		assertEquals(46, sessionTotal(snapshotOnDisk()));
+		plugin.shutDown();
+
+		clientTotal(Skill.THIEVING, 1_046);
+		now = 1_770_000_050_000L;
+		plugin.startUp();
+		runClientThreadQueue();
+		ControlledPublisher second = executors.get(1);
+		second.runScheduledTaskOnce();
+		String restarted = snapshotOnDisk();
+		assertEquals("[]", sessionGains(restarted));
+		assertEquals("1770000050000", value(restarted, "trackingStartedAt"));
+
+		statChanged(Skill.THIEVING, 1_056);
+		second.runScheduledTaskOnce();
+		String json = snapshotOnDisk();
+		assertTrue(json, json.contains(gainEntry("thieving", 10, 10)));
+		assertEquals(10, sessionTotal(json));
+
+		plugin.shutDown();
+	}
+
+	/**
+	 * Lifetime totals go out under {@code skills.entries[].xp} and nowhere else. Session gain is only
+	 * the difference this run measured.
+	 */
+	@Test
+	public void lifetimeSkillTotalsAreExportedUnderSkillsAndNeverAsSessionGain() throws IOException
+	{
+		logInClient();
+		giveClientReadableSkills();
+		plugin.startUp();
+		runClientThreadQueue();
+		ControlledPublisher executor = onlyExecutor();
+		executor.runScheduledTaskOnce();
+		String seeded = snapshotOnDisk();
+		assertTrue(seeded, seeded.contains(
+			"{\"skill\":\"attack\",\"level\":60,\"boostedLevel\":61,\"xp\":100000}"));
+		assertEquals("[]", sessionGains(seeded));
+
+		statChanged(Skill.ATTACK, 100_088);
+		clientTotal(Skill.ATTACK, 100_088);
+		tick();
+		executor.runScheduledTaskOnce();
+		String json = snapshotOnDisk();
+		assertTrue(json, json.contains(
+			"{\"skill\":\"attack\",\"level\":60,\"boostedLevel\":61,\"xp\":100088}"));
+		assertTrue(json, sessionGains(json).startsWith("[" + gainEntry("attack", 88, 88)));
+		assertEquals(88, sessionTotal(json));
+
+		plugin.shutDown();
+	}
+
+	/** No ceiling: a large genuine gain is reported in full. */
+	@Test
+	public void aLargeGenuineGainIsReportedInFull() throws IOException
+	{
+		logInClient();
+		clientTotal(Skill.FARMING, 13_000_000);
+		plugin.startUp();
+		runClientThreadQueue();
+		ControlledPublisher executor = onlyExecutor();
+
+		statChanged(Skill.FARMING, 15_000_000);
+		executor.runScheduledTaskOnce();
+		String json = snapshotOnDisk();
+		assertTrue(json, json.contains(gainEntry("farming", 2_000_000, 2_000_000)));
+		assertEquals(2_000_000, sessionTotal(json));
+
+		plugin.shutDown();
+	}
+
+	/**
+	 * After a zero seed leaves a skill without a comparison point, a negative live reading must not
+	 * claim it. Otherwise the login sync that follows is reported as a gain the size of the skill's
+	 * lifetime total plus one.
+	 */
+	@Test
+	public void aNegativeLiveReadingCannotBecomeTheComparisonPointAfterAZeroSeed()
+		throws IOException
+	{
+		when(client.getGameState()).thenReturn(GameState.LOADING);
+		plugin.startUp();
+		runClientThreadQueue();
+		ControlledPublisher executor = onlyExecutor();
+
+		// Live, but every skill still reads zero: the seed refuses them all.
+		logInClient();
+		gameState(GameState.LOGGED_IN);
+		tick();
+		executor.runScheduledTaskOnce();
+		assertEquals("[]", sessionGains(snapshotOnDisk()));
+
+		now = 1_770_000_001_000L;
+		statChanged(Skill.FARMING, -1);
+		// Nothing changed, so a heartbeat is what proves the document was rewritten.
+		elapsed += TimeUnit.MILLISECONDS.toNanos(HEARTBEAT_MILLIS);
+		executor.runScheduledTaskOnce();
+		String negative = snapshotOnDisk();
+		assertEquals("[]", sessionGains(negative));
+		assertEquals("null", value(negative, "lastSkill"));
+
+		// The login sync lands with the lifetime total.
+		now = 1_770_000_002_000L;
+		statChanged(Skill.FARMING, 13_165_057);
+		clientTotal(Skill.FARMING, 13_165_057);
+		tick();
+		elapsed += TimeUnit.MILLISECONDS.toNanos(HEARTBEAT_MILLIS);
+		executor.runScheduledTaskOnce();
+		String synced = snapshotOnDisk();
+		assertEquals("lifetime totals must never be reported as session gain", "[]",
+			sessionGains(synced));
+		assertEquals("null", value(synced, "lastSkill"));
+		assertEquals(0, sessionTotal(synced));
+
+		// The next genuine gain is measured against the synced total, once.
+		now = 1_770_000_005_000L;
+		statChanged(Skill.FARMING, 13_165_100);
+		executor.runScheduledTaskOnce();
+		String json = snapshotOnDisk();
+		assertEquals("[" + gainEntry("farming", 43, 43) + "\"lastChangedAt\":1770000005000}]",
+			sessionGains(json));
+		assertEquals(43, sessionTotal(json));
+		assertEquals("\"farming\"", value(json, "lastSkill"));
+		assertEquals("43", value(json, "lastDelta"));
+
+		plugin.shutDown();
+	}
+
+	/** A negative reading against an existing comparison point moves neither it nor any gain. */
+	@Test
+	public void aNegativeLiveReadingAgainstAnExistingComparisonPointChangesNothing()
+		throws IOException
+	{
+		logInClient();
+		clientTotal(Skill.WOODCUTTING, 1_000);
+		plugin.startUp();
+		runClientThreadQueue();
+		ControlledPublisher executor = onlyExecutor();
+		now = 1_770_000_004_000L;
+		statChanged(Skill.WOODCUTTING, 1_065);
+		executor.runScheduledTaskOnce();
+		assertEquals(65, sessionTotal(snapshotOnDisk()));
+
+		now = 1_770_000_006_000L;
+		statChanged(Skill.WOODCUTTING, -1);
+		// Nothing changed, so a heartbeat is what proves the document was rewritten.
+		elapsed += TimeUnit.MILLISECONDS.toNanos(HEARTBEAT_MILLIS);
+		executor.runScheduledTaskOnce();
+		String negative = snapshotOnDisk();
+		assertEquals(65, sessionTotal(negative));
+		assertEquals("\"woodcutting\"", value(negative, "lastSkill"));
+		assertEquals("65", value(negative, "lastDelta"));
+		assertEquals("1770000004000", value(negative, "lastChangedAt"));
+
+		// Measured against the unmoved 1,065.
+		now = 1_770_000_008_000L;
+		statChanged(Skill.WOODCUTTING, 1_100);
+		executor.runScheduledTaskOnce();
+		String json = snapshotOnDisk();
+		assertTrue(json, json.contains(gainEntry("woodcutting", 100, 35)));
+		assertEquals(100, sessionTotal(json));
+		assertEquals("35", value(json, "lastDelta"));
+
+		plugin.shutDown();
+	}
+
+	/**
+	 * The cost of refusing a zero seed, pinned so it is a decision rather than an accident. A skill
+	 * that truly has no experience reads the same as one the client has not filled in, so its first
+	 * gain only establishes the comparison point. Every later gain is reported.
+	 */
+	@Test
+	public void anUntrainedSkillsFirstObservationOnlyEstablishesItsComparisonPoint()
+		throws IOException
+	{
+		logInClient();
+		plugin.startUp();
+		runClientThreadQueue();
+		ControlledPublisher executor = onlyExecutor();
+
+		statChanged(Skill.CONSTRUCTION, 25);
+		executor.runScheduledTaskOnce();
+		assertEquals("[]", sessionGains(snapshotOnDisk()));
+
+		statChanged(Skill.CONSTRUCTION, 50);
+		executor.runScheduledTaskOnce();
+		String json = snapshotOnDisk();
+		assertTrue(json, json.contains(gainEntry("construction", 25, 25)));
+		assertEquals(25, sessionTotal(json));
+
+		plugin.shutDown();
+	}
+
 	// --- 10. shutdown hands the final write over and returns ---------------------------------
 
 	/**
