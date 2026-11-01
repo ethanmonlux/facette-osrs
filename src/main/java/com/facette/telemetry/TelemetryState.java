@@ -717,7 +717,10 @@ final class TelemetryState
 	 */
 	synchronized boolean observeXp(String skillName, int skillOrder, int totalXp)
 	{
-		if (!loggedIn || skillName == null)
+		// Refused before the baseline is read, as the seed and retention paths do. A negative total
+		// stored as the comparison point would turn the next real total into a gain the size of the
+		// skill's whole lifetime experience.
+		if (!loggedIn || skillName == null || totalXp < 0)
 		{
 			return false;
 		}

@@ -1104,6 +1104,101 @@ public class FacetteTelemetryPluginLifecycleTest
 	}
 
 	/**
+	 * After a zero seed leaves a skill without a comparison point, a negative live reading must not
+	 * claim it. Otherwise the login sync that follows is reported as a gain the size of the skill's
+	 * lifetime total plus one.
+	 */
+	@Test
+	public void aNegativeLiveReadingCannotBecomeTheComparisonPointAfterAZeroSeed()
+		throws IOException
+	{
+		when(client.getGameState()).thenReturn(GameState.LOADING);
+		plugin.startUp();
+		runClientThreadQueue();
+		ControlledPublisher executor = onlyExecutor();
+
+		// Live, but every skill still reads zero: the seed refuses them all.
+		logInClient();
+		gameState(GameState.LOGGED_IN);
+		tick();
+		executor.runScheduledTaskOnce();
+		assertEquals("[]", sessionGains(snapshotOnDisk()));
+
+		now = 1_770_000_001_000L;
+		statChanged(Skill.FARMING, -1);
+		// Nothing changed, so a heartbeat is what proves the document was rewritten.
+		elapsed += TimeUnit.MILLISECONDS.toNanos(HEARTBEAT_MILLIS);
+		executor.runScheduledTaskOnce();
+		String negative = snapshotOnDisk();
+		assertEquals("[]", sessionGains(negative));
+		assertEquals("null", value(negative, "lastSkill"));
+
+		// The login sync lands with the lifetime total.
+		now = 1_770_000_002_000L;
+		statChanged(Skill.FARMING, 13_165_057);
+		clientTotal(Skill.FARMING, 13_165_057);
+		tick();
+		elapsed += TimeUnit.MILLISECONDS.toNanos(HEARTBEAT_MILLIS);
+		executor.runScheduledTaskOnce();
+		String synced = snapshotOnDisk();
+		assertEquals("lifetime totals must never be reported as session gain", "[]",
+			sessionGains(synced));
+		assertEquals("null", value(synced, "lastSkill"));
+		assertEquals(0, sessionTotal(synced));
+
+		// The next genuine gain is measured against the synced total, once.
+		now = 1_770_000_005_000L;
+		statChanged(Skill.FARMING, 13_165_100);
+		executor.runScheduledTaskOnce();
+		String json = snapshotOnDisk();
+		assertEquals("[" + gainEntry("farming", 43, 43) + "\"lastChangedAt\":1770000005000}]",
+			sessionGains(json));
+		assertEquals(43, sessionTotal(json));
+		assertEquals("\"farming\"", value(json, "lastSkill"));
+		assertEquals("43", value(json, "lastDelta"));
+
+		plugin.shutDown();
+	}
+
+	/** A negative reading against an existing comparison point moves neither it nor any gain. */
+	@Test
+	public void aNegativeLiveReadingAgainstAnExistingComparisonPointChangesNothing()
+		throws IOException
+	{
+		logInClient();
+		clientTotal(Skill.WOODCUTTING, 1_000);
+		plugin.startUp();
+		runClientThreadQueue();
+		ControlledPublisher executor = onlyExecutor();
+		now = 1_770_000_004_000L;
+		statChanged(Skill.WOODCUTTING, 1_065);
+		executor.runScheduledTaskOnce();
+		assertEquals(65, sessionTotal(snapshotOnDisk()));
+
+		now = 1_770_000_006_000L;
+		statChanged(Skill.WOODCUTTING, -1);
+		// Nothing changed, so a heartbeat is what proves the document was rewritten.
+		elapsed += TimeUnit.MILLISECONDS.toNanos(HEARTBEAT_MILLIS);
+		executor.runScheduledTaskOnce();
+		String negative = snapshotOnDisk();
+		assertEquals(65, sessionTotal(negative));
+		assertEquals("\"woodcutting\"", value(negative, "lastSkill"));
+		assertEquals("65", value(negative, "lastDelta"));
+		assertEquals("1770000004000", value(negative, "lastChangedAt"));
+
+		// Measured against the unmoved 1,065.
+		now = 1_770_000_008_000L;
+		statChanged(Skill.WOODCUTTING, 1_100);
+		executor.runScheduledTaskOnce();
+		String json = snapshotOnDisk();
+		assertTrue(json, json.contains(gainEntry("woodcutting", 100, 35)));
+		assertEquals(100, sessionTotal(json));
+		assertEquals("35", value(json, "lastDelta"));
+
+		plugin.shutDown();
+	}
+
+	/**
 	 * The cost of refusing a zero seed, pinned so it is a decision rather than an accident. A skill
 	 * that truly has no experience reads the same as one the client has not filled in, so its first
 	 * gain only establishes the comparison point. Every later gain is reported.
