@@ -228,6 +228,8 @@ final class TelemetryState
 	private Integer questPoints;
 	private Integer slayerRemaining;
 	private Integer slayerTaskCreatureId;
+	private Integer slayerTaskBossId;
+	private Integer slayerTaskAreaId;
 	private List<TelemetryGrandExchangeSlot> grandExchangeSlots;
 
 	TelemetryState(String instanceId, LongSupplier wallClockMillis, LongSupplier elapsedNanos)
@@ -408,13 +410,28 @@ final class TelemetryState
 		int questPoints,
 		int slayerRemaining,
 		int slayerTaskCreatureId,
+		int slayerTaskBossId,
+		int slayerTaskAreaId,
 		List<TelemetryGrandExchangeSlot> grandExchangeSlots)
 	{
 		applySkillStates(states);
 		applyAccountType(accountTypeId);
 		applyQuestPoints(questPoints);
-		applySlayerTask(slayerRemaining, slayerTaskCreatureId);
+		applySlayerTask(slayerRemaining, slayerTaskCreatureId, slayerTaskBossId, slayerTaskAreaId);
 		applyGrandExchange(grandExchangeSlots);
+	}
+
+	/** A sample carrying no boss or area reading, which publishes both as not reported. */
+	synchronized void applySchema3Sample(
+		List<TelemetrySkillState> states,
+		int accountTypeId,
+		int questPoints,
+		int slayerRemaining,
+		int slayerTaskCreatureId,
+		List<TelemetryGrandExchangeSlot> grandExchangeSlots)
+	{
+		applySchema3Sample(states, accountTypeId, questPoints, slayerRemaining,
+			slayerTaskCreatureId, -1, 0, grandExchangeSlots);
 	}
 
 	/**
@@ -482,8 +499,15 @@ final class TelemetryState
 	 * something" -- and a reader cannot tell that apart from the no-task state, which is the same two
 	 * fields with a zero in them. So the whole group clears and the capability says unavailable. The
 	 * last known creature is not held over: it names a task the client has stopped confirming.
+	 *
+	 * The boss and the area are refinements of a running task, so they never decide whether the
+	 * group is supported. Each is carried only while a task is running, and the boss only on the
+	 * boss task, because the game leaves the boss variable holding the last boss after the task
+	 * changes. A reading that does not qualify is "not reported", null, rather than a stale value or
+	 * a guess. An area of zero is the game's "no area", which is the rule RuneLite's own Slayer
+	 * plugin applies.
 	 */
-	private void applySlayerTask(int remaining, int taskCreatureId)
+	private void applySlayerTask(int remaining, int taskCreatureId, int taskBossId, int taskAreaId)
 	{
 		if (!loggedIn)
 		{
@@ -494,9 +518,15 @@ final class TelemetryState
 			clearSlayerTask();
 			return;
 		}
+		boolean running = remaining > 0;
+		boolean bossTask = running && taskCreatureId == TelemetrySnapshot.SLAYER_BOSS_TASK_ID;
 		slayerRemaining = set(slayerRemaining, Integer.valueOf(remaining));
 		slayerTaskCreatureId =
-			set(slayerTaskCreatureId, remaining > 0 ? Integer.valueOf(taskCreatureId) : null);
+			set(slayerTaskCreatureId, running ? Integer.valueOf(taskCreatureId) : null);
+		slayerTaskBossId =
+			set(slayerTaskBossId, bossTask && taskBossId >= 0 ? Integer.valueOf(taskBossId) : null);
+		slayerTaskAreaId =
+			set(slayerTaskAreaId, running && taskAreaId > 0 ? Integer.valueOf(taskAreaId) : null);
 	}
 
 	private void applyGrandExchange(List<TelemetryGrandExchangeSlot> slots)
@@ -541,6 +571,8 @@ final class TelemetryState
 	{
 		slayerRemaining = set(slayerRemaining, null);
 		slayerTaskCreatureId = set(slayerTaskCreatureId, null);
+		slayerTaskBossId = set(slayerTaskBossId, null);
+		slayerTaskAreaId = set(slayerTaskAreaId, null);
 	}
 
 	private void clearGrandExchange()
@@ -838,7 +870,7 @@ final class TelemetryState
 				.skills(skillStates)
 				.account(accountTypeId)
 				.quests(questPoints)
-				.slayer(slayerRemaining, slayerTaskCreatureId)
+				.slayer(slayerRemaining, slayerTaskCreatureId, slayerTaskBossId, slayerTaskAreaId)
 				.grandExchange(grandExchangeSlots);
 		}
 		else
@@ -899,8 +931,7 @@ final class TelemetryState
 		skillStates = set(skillStates, null);
 		accountTypeId = set(accountTypeId, null);
 		questPoints = set(questPoints, null);
-		slayerRemaining = set(slayerRemaining, null);
-		slayerTaskCreatureId = set(slayerTaskCreatureId, null);
+		clearSlayerTask();
 		grandExchangeSlots = set(grandExchangeSlots, null);
 
 		// The experience fields and the tracking stamp are left alone, because a world hop passes

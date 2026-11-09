@@ -33,8 +33,8 @@ import java.util.List;
 import java.util.Objects;
 
 /**
- * One immutable schema-3 telemetry snapshot and its canonical JSON form. The schema is closed: every
- * field named here is exported and nothing else is.
+ * One immutable telemetry snapshot and its canonical JSON forms, schema 3 and schema 4. Each schema is
+ * closed: every field it names is exported and nothing else is.
  *
  * The JSON is written by hand rather than reflected out of this object, both to fix the key order
  * and because reflection is not permitted in a Plugin Hub plugin. Every collection is fixed-size or
@@ -46,10 +46,23 @@ import java.util.Objects;
  * everything it knows exactly where it was. The new groups each answer for themselves in
  * {@code capabilities}: a group is reported supported only while it is actually carrying values, and
  * a group that could not be read is null rather than filled in with a default.
+ *
+ * Schema 4 is schema 3 plus two trailing keys in {@code slayer}, and is written to its own file.
+ * Schema 3 is closed, and Facette's schema-3 reader refuses any key it does not know, so the boss and
+ * area identifiers cannot be added to it. The schema-3 document is unchanged, byte for byte, and a
+ * reader that has not moved to schema 4 never sees the new keys.
  */
 final class TelemetrySnapshot
 {
 	static final int SCHEMA = 3;
+
+	// Schema 3 plus the slayer boss and area identifiers. Written beside schema 3, never instead of it.
+	static final int SCHEMA_4 = 4;
+
+	// The task identifier the game uses for "a boss of your choice". The boss is then named by a
+	// separate variable, which describes nothing on any other task. The value is the one RuneLite's
+	// own Slayer plugin compares against, taken from the game's helper_slayer_current_assignment.
+	static final int SLAYER_BOSS_TASK_ID = 98;
 
 	static final String SOURCE = "runelite";
 
@@ -127,6 +140,8 @@ final class TelemetrySnapshot
 
 	private final Integer slayerRemaining;
 	private final Integer slayerTaskCreatureId;
+	private final Integer slayerTaskBossId;
+	private final Integer slayerTaskAreaId;
 
 	private final List<TelemetryGrandExchangeSlot> grandExchangeSlots;
 
@@ -156,6 +171,8 @@ final class TelemetrySnapshot
 		this.accountTypeId = b.accountTypeId;
 		this.questPoints = b.questPoints;
 		this.slayerTaskCreatureId = b.slayerTaskCreatureId;
+		this.slayerTaskBossId = b.slayerTaskBossId;
+		this.slayerTaskAreaId = b.slayerTaskAreaId;
 
 		if (seq < 0)
 		{
@@ -199,6 +216,25 @@ final class TelemetrySnapshot
 			throw new IllegalArgumentException(
 				"a slayer task creature cannot be reported without a remaining count");
 		}
+
+		// The boss and the area refine a running task. Without one they describe nothing, and a boss
+		// beside any task other than the boss task would be a stale variable read as a fact.
+		if ((slayerTaskBossId != null || slayerTaskAreaId != null) && slayerTaskCreatureId == null)
+		{
+			throw new IllegalArgumentException(
+				"a slayer boss or area cannot be reported without a running task");
+		}
+		if (slayerTaskBossId != null && slayerTaskCreatureId != SLAYER_BOSS_TASK_ID)
+		{
+			throw new IllegalArgumentException(
+				"a slayer boss can be reported only on the boss task");
+		}
+		if ((slayerTaskBossId != null && slayerTaskBossId < 0)
+			|| (slayerTaskAreaId != null && slayerTaskAreaId <= 0))
+		{
+			throw new IllegalArgumentException(
+				"a slayer boss must be non-negative and a slayer area positive");
+		}
 	}
 
 	static Builder builder()
@@ -231,12 +267,26 @@ final class TelemetrySnapshot
 		return loggedIn;
 	}
 
-	/** Key order and key set are fixed here and are the contract Facette reads. */
+	/** The schema-3 document. Key order and key set are fixed here and are the contract Facette reads. */
 	String toJson()
 	{
+		return toJson(SCHEMA);
+	}
+
+	/**
+	 * The document for one schema. The two differ in the {@code schema} value and in the two slayer
+	 * keys schema 4 appends, and in nothing else, so a schema-4 reader finds every schema-3 key where
+	 * schema 3 put it.
+	 */
+	String toJson(int schema)
+	{
+		if (schema != SCHEMA && schema != SCHEMA_4)
+		{
+			throw new IllegalArgumentException("no such schema: " + schema);
+		}
 		StringBuilder sb = new StringBuilder(4_096);
 		sb.append('{');
-		num(sb, "schema", SCHEMA).append(',');
+		num(sb, "schema", schema).append(',');
 		str(sb, "source", SOURCE, SOURCE.length()).append(',');
 		str(sb, "instanceId", instanceId, MAX_INSTANCE_ID_CHARS).append(',');
 		num(sb, "seq", seq).append(',');
@@ -312,6 +362,12 @@ final class TelemetrySnapshot
 		key(sb, "slayer").append('{');
 		num(sb, "remaining", slayerRemaining).append(',');
 		num(sb, "taskCreatureId", slayerTaskCreatureId);
+		if (schema == SCHEMA_4)
+		{
+			sb.append(',');
+			num(sb, "taskBossId", slayerTaskBossId).append(',');
+			num(sb, "taskAreaId", slayerTaskAreaId);
+		}
 		sb.append("},");
 
 		key(sb, "grandExchange").append('{');
@@ -361,7 +417,12 @@ final class TelemetrySnapshot
 
 	byte[] toJsonBytes()
 	{
-		return toJson().getBytes(StandardCharsets.UTF_8);
+		return toJsonBytes(SCHEMA);
+	}
+
+	byte[] toJsonBytes(int schema)
+	{
+		return toJson(schema).getBytes(StandardCharsets.UTF_8);
 	}
 
 	private StringBuilder appendPrayers(StringBuilder sb)
@@ -723,6 +784,8 @@ final class TelemetrySnapshot
 		private Integer questPoints;
 		private Integer slayerRemaining;
 		private Integer slayerTaskCreatureId;
+		private Integer slayerTaskBossId;
+		private Integer slayerTaskAreaId;
 		private List<TelemetryGrandExchangeSlot> grandExchangeSlots;
 
 		private Builder()
@@ -818,8 +881,17 @@ final class TelemetrySnapshot
 		/** A null creature identifier with a remaining count is "no task assigned". */
 		Builder slayer(Integer remaining, Integer taskCreatureId)
 		{
+			return slayer(remaining, taskCreatureId, null, null);
+		}
+
+		/** A null boss or area beside a running task is "not reported", never a guess. */
+		Builder slayer(Integer remaining, Integer taskCreatureId, Integer taskBossId,
+			Integer taskAreaId)
+		{
 			this.slayerRemaining = remaining;
 			this.slayerTaskCreatureId = taskCreatureId;
+			this.slayerTaskBossId = taskBossId;
+			this.slayerTaskAreaId = taskAreaId;
 			return this;
 		}
 

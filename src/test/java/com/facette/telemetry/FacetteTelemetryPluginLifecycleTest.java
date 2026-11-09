@@ -275,6 +275,13 @@ public class FacetteTelemetryPluginLifecycleTest
 		return new String(Files.readAllBytes(target), StandardCharsets.UTF_8);
 	}
 
+	private String schema4SnapshotOnDisk() throws IOException
+	{
+		Path target = dataDirectory.resolve(TelemetrySnapshotWriter.SCHEMA_4_TARGET_FILE_NAME);
+		assertTrue("no schema-4 snapshot was written", Files.exists(target));
+		return new String(Files.readAllBytes(target), StandardCharsets.UTF_8);
+	}
+
 	private boolean snapshotExists()
 	{
 		return Files.exists(dataDirectory.resolve(TelemetrySnapshotWriter.TARGET_FILE_NAME));
@@ -1695,6 +1702,206 @@ public class FacetteTelemetryPluginLifecycleTest
 			"\"account\":{\"type\":\"hardcore_ironman\",\"typeId\":3}"));
 		assertTrue(json, json.contains("\"quests\":{\"points\":231}"));
 		assertTrue(json, json.contains("\"slayer\":{\"remaining\":42,\"taskCreatureId\":494}"));
+
+		plugin.shutDown();
+	}
+
+	/**
+	 * On the boss task, the boss comes from the game's boss variable and the area from its area
+	 * variable. Both land in the schema-4 file, and the schema-3 file a reader already knows is
+	 * written in the same publication with neither of them in it.
+	 */
+	@Test
+	public void theSlayerBossAndAreaComeFromTheDocumentedVariablesAndOnlyIntoSchemaFour()
+		throws IOException
+	{
+		logInClient();
+		when(client.getVarpValue(VarPlayerID.SLAYER_COUNT)).thenReturn(12);
+		when(client.getVarpValue(VarPlayerID.SLAYER_TARGET))
+			.thenReturn(TelemetrySnapshot.SLAYER_BOSS_TASK_ID);
+		when(client.getVarbitValue(VarbitID.SLAYER_TARGET_BOSSID)).thenReturn(23);
+		when(client.getVarpValue(VarPlayerID.SLAYER_AREA)).thenReturn(7);
+
+		plugin.startUp();
+		runClientThreadQueue();
+		onlyExecutor().runScheduledTaskOnce();
+
+		String schema3 = snapshotOnDisk();
+		String schema4 = schema4SnapshotOnDisk();
+		assertTrue(schema3, schema3.startsWith("{\"schema\":3,"));
+		assertTrue(schema3, schema3.contains("\"slayer\":{\"remaining\":12,\"taskCreatureId\":98},"));
+		assertFalse(schema3, schema3.contains("taskBossId"));
+		assertFalse(schema3, schema3.contains("taskAreaId"));
+		assertTrue(schema4, schema4.startsWith("{\"schema\":4,"));
+		assertTrue(schema4, schema4.contains("\"slayer\":{\"remaining\":12,\"taskCreatureId\":98,"
+			+ "\"taskBossId\":23,\"taskAreaId\":7},"));
+		assertEquals("one publication, one sequence number, in both files",
+			value(schema3, "seq"), value(schema4, "seq"));
+		assertEquals(value(schema3, "instanceId"), value(schema4, "instanceId"));
+		assertEquals(value(schema3, "emittedAt"), value(schema4, "emittedAt"));
+
+		plugin.shutDown();
+	}
+
+	/** The boss variable on an ordinary task is a leftover, and is not published as a boss. */
+	@Test
+	public void theBossVariableOnAnOrdinaryTaskIsNotPublished() throws IOException
+	{
+		logInClient();
+		when(client.getVarpValue(VarPlayerID.SLAYER_COUNT)).thenReturn(42);
+		when(client.getVarpValue(VarPlayerID.SLAYER_TARGET)).thenReturn(494);
+		when(client.getVarbitValue(VarbitID.SLAYER_TARGET_BOSSID)).thenReturn(23);
+		when(client.getVarpValue(VarPlayerID.SLAYER_AREA)).thenReturn(0);
+
+		plugin.startUp();
+		runClientThreadQueue();
+		onlyExecutor().runScheduledTaskOnce();
+
+		String schema4 = schema4SnapshotOnDisk();
+		assertTrue(schema4, schema4.contains("\"slayer\":{\"remaining\":42,\"taskCreatureId\":494,"
+			+ "\"taskBossId\":null,\"taskAreaId\":null},"));
+
+		plugin.shutDown();
+	}
+
+	private void onABossTask()
+	{
+		when(client.getVarpValue(VarPlayerID.SLAYER_COUNT)).thenReturn(12);
+		when(client.getVarpValue(VarPlayerID.SLAYER_TARGET))
+			.thenReturn(TelemetrySnapshot.SLAYER_BOSS_TASK_ID);
+		when(client.getVarbitValue(VarbitID.SLAYER_TARGET_BOSSID)).thenReturn(23);
+		when(client.getVarpValue(VarPlayerID.SLAYER_AREA)).thenReturn(7);
+	}
+
+	private String[] temporaryFilesOnDisk()
+	{
+		return dataDirectory.toFile().list((directory, name) -> name.endsWith(".tmp"));
+	}
+
+	/**
+	 * Schema 4 is written only once schema 3 has committed. A schema-3 write that fails leaves the
+	 * schema-4 file exactly as it was, so the number schema 3 then reuses is never one that schema 4
+	 * already carried with different content.
+	 */
+	@Test
+	public void aFailedSchemaThreeWriteLeavesSchemaFourUntouched() throws IOException
+	{
+		logInClient();
+		onABossTask();
+		plugin.startUp();
+		runClientThreadQueue();
+		ControlledPublisher executor = onlyExecutor();
+		executor.runScheduledTaskOnce();
+		String firstSchema4 = schema4SnapshotOnDisk();
+		assertEquals("0", value(firstSchema4, "seq"));
+
+		// A directory where the schema-3 file belongs makes its replacement fail.
+		Path schema3 = dataDirectory.resolve(TelemetrySnapshotWriter.TARGET_FILE_NAME);
+		Files.delete(schema3);
+		Files.createDirectory(schema3);
+		elapsed += HEARTBEAT_MILLIS * 1_000_000L;
+		now = 1_770_000_050_000L;
+		executor.runScheduledTaskOnce();
+		assertEquals("schema 4 is not written past a failed schema 3",
+			firstSchema4, schema4SnapshotOnDisk());
+		assertEquals(0, temporaryFilesOnDisk().length);
+
+		// The refused number is reused, by both files, for the publication that does land.
+		Files.delete(schema3);
+		executor.runScheduledTaskOnce();
+		String schema3Json = snapshotOnDisk();
+		String schema4Json = schema4SnapshotOnDisk();
+		assertEquals("1", value(schema3Json, "seq"));
+		assertEquals("1", value(schema4Json, "seq"));
+		assertEquals("1770000050000", value(schema4Json, "emittedAt"));
+		assertEquals(value(schema3Json, "instanceId"), value(schema4Json, "instanceId"));
+
+		plugin.shutDown();
+	}
+
+	/**
+	 * A schema-4 write that fails changes nothing about schema 3. Its number is spent, the schema-4
+	 * file keeps its older document, which is what lets a reader see that schema 3 is newer, and the
+	 * next publication rewrites schema 4 under a higher number.
+	 */
+	@Test
+	public void aFailedSchemaFourWriteLeavesSchemaThreeAndTheNextPublicationRecoversIt()
+		throws IOException
+	{
+		logInClient();
+		onABossTask();
+		plugin.startUp();
+		runClientThreadQueue();
+		ControlledPublisher executor = onlyExecutor();
+		executor.runScheduledTaskOnce();
+		String firstSchema4 = schema4SnapshotOnDisk();
+
+		Path schema4 = dataDirectory.resolve(TelemetrySnapshotWriter.SCHEMA_4_TARGET_FILE_NAME);
+		Files.delete(schema4);
+		Files.createDirectory(schema4);
+		elapsed += HEARTBEAT_MILLIS * 1_000_000L;
+		now = 1_770_000_050_000L;
+		executor.runScheduledTaskOnce();
+		String schema3Json = snapshotOnDisk();
+		assertEquals("schema 3 commits regardless", "1", value(schema3Json, "seq"));
+		assertEquals("1770000050000", value(schema3Json, "emittedAt"));
+		assertTrue("the schema-4 target was not touched", Files.isDirectory(schema4));
+		assertEquals(0, temporaryFilesOnDisk().length);
+
+		// Restore the schema-4 file to its last good document: same run, a lower number than
+		// schema 3. That pair is what a reader holds after the failure.
+		Files.delete(schema4);
+		Files.write(schema4, firstSchema4.getBytes(StandardCharsets.UTF_8));
+		assertEquals(value(schema3Json, "instanceId"), value(schema4SnapshotOnDisk(), "instanceId"));
+		assertTrue(Integer.parseInt(value(schema3Json, "seq"))
+			> Integer.parseInt(value(schema4SnapshotOnDisk(), "seq")));
+
+		// Nothing is due until the next change or heartbeat, and that publication repairs schema 4.
+		executor.runScheduledTaskOnce();
+		assertEquals(firstSchema4, schema4SnapshotOnDisk());
+		elapsed += HEARTBEAT_MILLIS * 1_000_000L;
+		now = 1_770_000_100_000L;
+		executor.runScheduledTaskOnce();
+		String recovered3 = snapshotOnDisk();
+		String recovered4 = schema4SnapshotOnDisk();
+		assertEquals("2", value(recovered3, "seq"));
+		assertEquals("the skipped number stays skipped", "2", value(recovered4, "seq"));
+		assertEquals(value(recovered3, "emittedAt"), value(recovered4, "emittedAt"));
+		assertTrue(recovered4, recovered4.contains("\"taskBossId\":23,\"taskAreaId\":7},"));
+
+		plugin.shutDown();
+	}
+
+	/**
+	 * Finishing the task and logging out reach the schema-4 file the same way they reach schema 3.
+	 * The game leaves the last boss in its variable after the task ends, and that is not published.
+	 */
+	@Test
+	public void finishingTheTaskAndLoggingOutClearTheBossAndAreaInSchemaFour() throws IOException
+	{
+		logInClient();
+		onABossTask();
+		plugin.startUp();
+		runClientThreadQueue();
+		ControlledPublisher executor = onlyExecutor();
+		executor.runScheduledTaskOnce();
+		assertTrue(schema4SnapshotOnDisk().contains("\"taskBossId\":23,\"taskAreaId\":7},"));
+
+		when(client.getVarpValue(VarPlayerID.SLAYER_COUNT)).thenReturn(0);
+		tick();
+		elapsed += HEARTBEAT_MILLIS * 1_000_000L;
+		executor.runScheduledTaskOnce();
+		String finished = schema4SnapshotOnDisk();
+		assertTrue(finished, finished.contains("\"taskBossId\":null,\"taskAreaId\":null},"));
+		assertEquals(value(snapshotOnDisk(), "seq"), value(finished, "seq"));
+
+		when(client.getGameState()).thenReturn(GameState.LOGIN_SCREEN);
+		gameState(GameState.LOGIN_SCREEN);
+		executor.runScheduledTaskOnce();
+		String loggedOut = schema4SnapshotOnDisk();
+		assertTrue(loggedOut, loggedOut.contains("\"slayer\":{\"remaining\":null,"
+			+ "\"taskCreatureId\":null,\"taskBossId\":null,\"taskAreaId\":null},"));
+		assertEquals(value(snapshotOnDisk(), "seq"), value(loggedOut, "seq"));
 
 		plugin.shutDown();
 	}

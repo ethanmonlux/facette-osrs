@@ -30,8 +30,8 @@ and it behaves the same whether Facette is installed, running, or absent.
 
 ## What it does and does not do
 
-**Read-only.** The plugin reads supported RuneLite client state and writes one local snapshot
-file. It performs no clicks, no keystrokes, no menu actions, no automation, and no window
+**Read-only.** The plugin reads supported RuneLite client state and writes one local snapshot,
+as two schema-versioned files side by side. It performs no clicks, no keystrokes, no menu actions, no automation, and no window
 manipulation, and it accepts no commands from Facette or from the file it writes.
 
 **No network communication.** Your game state does not leave your computer because of this
@@ -53,28 +53,39 @@ current Slayer task's remaining count and creature id; and your own Grand Exchan
 Each of those groups reports whether it is carrying values, so a reader can tell "there is nothing
 there" from "this could not be read".
 
+### Exported under schema 4
+
+Everything schema 3 exports, plus two identifiers on your current Slayer task: which boss, on a
+boss task, and which area, when the task was assigned to one. They are identifiers only, never
+names. Schema 4 is written to its own file beside schema 3's, so a reader of schema 3 keeps reading
+exactly the document it read before.
+
 ### Not exported under schema 3
 
 Account name or hash, credentials, chat, friends, clan data, other players, any player target,
 bank contents, Seed Vault, collection log, quest-by-quest progress, item prices or valuations,
 aggregate wealth, Grand Exchange trade history, and location.
 
-The schema 3 field list is closed and documented in **[SCHEMA.md](SCHEMA.md)**, with two committed
-byte-exact examples: [a populated snapshot](src/test/resources/facette-osrs-state-v3.json) and
-[a logged-out snapshot](src/test/resources/facette-osrs-state-v3-logged-out.json).
+The schema 3 and schema 4 field lists are closed and documented in **[SCHEMA.md](SCHEMA.md)**,
+with committed byte-exact examples: for schema 3,
+[a populated snapshot](src/test/resources/facette-osrs-state-v3.json) and
+[a logged-out snapshot](src/test/resources/facette-osrs-state-v3-logged-out.json); for schema 4,
+[a populated snapshot](src/test/resources/facette-osrs-state-v4.json) and
+[a logged-out snapshot](src/test/resources/facette-osrs-state-v4-logged-out.json).
 
-## Where the file is written
+## Where the files are written
 
 On Windows:
 
 ```text
 %USERPROFILE%\.runelite\facette\state-v3.json
+%USERPROFILE%\.runelite\facette\state-v4.json
 ```
 
 On other platforms it is the same location relative to RuneLite's own data directory,
-`~/.runelite/facette/state-v3.json`.
+`~/.runelite/facette/state-v3.json` and `~/.runelite/facette/state-v4.json`.
 
-That is the only path the plugin writes to. It creates the `facette` directory if it is missing,
+Those are the only two paths the plugin writes to. It creates the `facette` directory if it is missing,
 writes nothing inside your Old School RuneScape installation, does not scan your filesystem, and
 has no configurable output path.
 
@@ -122,7 +133,7 @@ Gradle install is needed.
 ```
 
 Then enable **Facette Companion** in the client's plugin list and confirm that `state-v3.json`
-appears at the path above.
+and `state-v4.json` appear at the path above.
 
 If your account requires Jagex Account authorization for the development client, that is yours to
 handle privately in your own environment. **Never paste an account credential, token, or session

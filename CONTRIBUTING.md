@@ -25,15 +25,15 @@ file adds.
 
 ## Architecture
 
-The plugin reads RuneLite client state on the client thread and writes one local JSON snapshot
-file. A separately installed reader picks the file up on its own. Nothing flows back: the plugin
+The plugin reads RuneLite client state on the client thread and writes one local JSON snapshot,
+as two schema-versioned files in one directory. A separately installed reader picks the file up on its own. Nothing flows back: the plugin
 performs no gameplay input, accepts no commands, and makes no network requests.
 
 Keep contributions inside that shape.
 
 ## Changing the exported schema
 
-Schema 2 contains only the fields documented in [SCHEMA.md](SCHEMA.md). A future schema may add
+Each schema contains only the fields documented in [SCHEMA.md](SCHEMA.md). A future schema may add
 fields after separate review, but contributors must not add them opportunistically.
 
 Open an issue before writing the code. A schema change needs:

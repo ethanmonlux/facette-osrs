@@ -42,7 +42,7 @@ import static org.junit.Assert.fail;
 import org.junit.Test;
 
 /**
- * Holds the committed schema-3 fixtures and the serializer to the same contract. The fixtures are
+ * Holds the committed schema-3 and schema-4 fixtures and the serializer to the same contract. The fixtures are
  * the cross-repository consumer contract: the Facette adapter commits the same bytes, so if the
  * serializer changes shape without them, the contract has silently forked and this says so.
  *
@@ -56,6 +56,16 @@ public class TelemetrySchemaFixtureTest
 
 	private static final String LOGGED_OUT_FIXTURE =
 		"src/test/resources/facette-osrs-state-v3-logged-out.json";
+
+	private static final String SCHEMA_4_POPULATED_FIXTURE =
+		"src/test/resources/facette-osrs-state-v4.json";
+
+	private static final String SCHEMA_4_LOGGED_OUT_FIXTURE =
+		"src/test/resources/facette-osrs-state-v4-logged-out.json";
+
+	private static final String[] ALL_FIXTURES = {
+		POPULATED_FIXTURE, LOGGED_OUT_FIXTURE, SCHEMA_4_POPULATED_FIXTURE, SCHEMA_4_LOGGED_OUT_FIXTURE,
+	};
 
 	private static final String MANIFEST = "runelite-plugin.properties";
 
@@ -78,6 +88,20 @@ public class TelemetrySchemaFixtureTest
 			readProjectFile(LOGGED_OUT_FIXTURE));
 	}
 
+	@Test
+	public void theCommittedSchemaFourFixturesAreExactlyWhatTheSerializerProduces()
+		throws IOException
+	{
+		assertArrayEquals(
+			SCHEMA_4_POPULATED_FIXTURE + " no longer matches the serializer",
+			TelemetrySnapshotTest.populatedSchema4Fixture().toJsonBytes(TelemetrySnapshot.SCHEMA_4),
+			readProjectFile(SCHEMA_4_POPULATED_FIXTURE));
+		assertArrayEquals(
+			SCHEMA_4_LOGGED_OUT_FIXTURE + " no longer matches the serializer",
+			TelemetrySnapshotTest.loggedOutFixture().toJsonBytes(TelemetrySnapshot.SCHEMA_4),
+			readProjectFile(SCHEMA_4_LOGGED_OUT_FIXTURE));
+	}
+
 	/**
 	 * The processed classpath copy has to be the same bytes too, so a consumer or a reviewer
 	 * reading either one is reading the same contract.
@@ -89,6 +113,24 @@ public class TelemetrySchemaFixtureTest
 			readResource("/facette-osrs-state-v3.json"));
 		assertArrayEquals(readProjectFile(LOGGED_OUT_FIXTURE),
 			readResource("/facette-osrs-state-v3-logged-out.json"));
+		assertArrayEquals(readProjectFile(SCHEMA_4_POPULATED_FIXTURE),
+			readResource("/facette-osrs-state-v4.json"));
+		assertArrayEquals(readProjectFile(SCHEMA_4_LOGGED_OUT_FIXTURE),
+			readResource("/facette-osrs-state-v4-logged-out.json"));
+	}
+
+	/** SCHEMA.md documents schema 4 by linking its two fixtures, and embeds neither. */
+	@Test
+	public void theSchemaDocumentLinksToBothSchemaFourFixturesInsteadOfEmbeddingThem()
+		throws IOException
+	{
+		String text = new String(readProjectFile("SCHEMA.md"), StandardCharsets.UTF_8);
+		for (String fixture : new String[]{SCHEMA_4_POPULATED_FIXTURE, SCHEMA_4_LOGGED_OUT_FIXTURE})
+		{
+			assertTrue("SCHEMA.md must link to " + fixture, text.contains(fixture));
+			assertFalse("SCHEMA.md must not embed " + fixture, text.contains(
+				new String(readProjectFile(fixture), StandardCharsets.UTF_8)));
+		}
 	}
 
 	/**
@@ -172,7 +214,7 @@ public class TelemetrySchemaFixtureTest
 	@Test
 	public void neitherFixtureContainsIdentityPathOrNetworkContent() throws IOException
 	{
-		for (String path : new String[]{POPULATED_FIXTURE, LOGGED_OUT_FIXTURE})
+		for (String path : ALL_FIXTURES)
 		{
 			String json = new String(readProjectFile(path), StandardCharsets.UTF_8);
 			for (String forbidden : new String[]{"http", "://", "C:\\", "/home/", "/Users/",
@@ -194,13 +236,17 @@ public class TelemetrySchemaFixtureTest
 			loggedOut < TelemetrySnapshotWriter.MAX_SNAPSHOT_BYTES);
 		assertTrue("a fixture that shrank this far is probably no longer the full shape",
 			populated > 4_096);
+		assertTrue(readProjectFile(SCHEMA_4_POPULATED_FIXTURE).length
+			< TelemetrySnapshotWriter.MAX_SNAPSHOT_BYTES);
+		assertTrue(readProjectFile(SCHEMA_4_LOGGED_OUT_FIXTURE).length
+			< TelemetrySnapshotWriter.MAX_SNAPSHOT_BYTES);
 	}
 
 	@Test
 	public void theFixturesCarryNoTrailingNewlineSoTheirBytesAreTheDocumentsBytes()
 		throws IOException
 	{
-		for (String path : new String[]{POPULATED_FIXTURE, LOGGED_OUT_FIXTURE})
+		for (String path : ALL_FIXTURES)
 		{
 			byte[] bytes = readProjectFile(path);
 			assertEquals(path + " must end with the closing brace and nothing else",

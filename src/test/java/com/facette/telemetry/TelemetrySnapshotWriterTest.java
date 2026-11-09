@@ -132,6 +132,78 @@ public class TelemetrySnapshotWriterTest
 			new TelemetrySnapshotWriter(directory).getTarget());
 	}
 
+	@Test
+	public void theSchemaFourWriterTargetsItsOwnVersionedFile()
+	{
+		assertEquals("state-v4.json", TelemetrySnapshotWriter.SCHEMA_4_TARGET_FILE_NAME);
+		assertEquals(directory.resolve("state-v4.json"),
+			new TelemetrySnapshotWriter(directory, TelemetrySnapshot.SCHEMA_4).getTarget());
+		assertEquals(directory.resolve("state-v3.json"),
+			new TelemetrySnapshotWriter(directory, TelemetrySnapshot.SCHEMA).getTarget());
+	}
+
+	@Test
+	public void aWriterForAnUnknownSchemaIsRefused()
+	{
+		for (int schema : new int[]{1, 2, 5})
+		{
+			try
+			{
+				new TelemetrySnapshotWriter(directory, schema);
+				fail("schema " + schema + " has no writer");
+			}
+			catch (IllegalArgumentException expected)
+			{
+				// expected
+			}
+		}
+	}
+
+	/**
+	 * Schema 4 is written beside schema 3, never through it. The schema-3 file a reader already
+	 * knows keeps its exact bytes, and each writer stages and sweeps only its own temporary files.
+	 */
+	@Test
+	public void theSchemaFourWriterLeavesTheSchemaThreeFileAndItsTemporaryFilesAlone()
+		throws IOException
+	{
+		TelemetrySnapshot snapshot = snapshot(0L, "LOGGED_IN");
+		new TelemetrySnapshotWriter(directory).write(snapshot, new ReentrantLock(), ALWAYS);
+		byte[] schema3 = Files.readAllBytes(directory.resolve("state-v3.json"));
+		Path schema3Temp = directory.resolve("state-v3-1111111111.tmp");
+		Files.write(schema3Temp, "stale staging".getBytes(StandardCharsets.UTF_8));
+		Files.setLastModifiedTime(schema3Temp, FileTime.fromMillis(NOW - 600_000L));
+
+		TelemetrySnapshotWriter schema4 = new TelemetrySnapshotWriter(
+			directory, TelemetrySnapshot.SCHEMA_4, Files::move, () -> NOW);
+		int written = schema4.write(snapshot, new ReentrantLock(), ALWAYS);
+
+		assertArrayEquals("the schema-3 file is untouched", schema3,
+			Files.readAllBytes(directory.resolve("state-v3.json")));
+		assertArrayEquals(snapshot.toJsonBytes(), schema3);
+		assertTrue("a schema-3 temporary file is not the schema-4 writer's to sweep",
+			Files.isRegularFile(schema3Temp));
+		byte[] schema4Bytes = Files.readAllBytes(directory.resolve("state-v4.json"));
+		assertArrayEquals(snapshot.toJsonBytes(TelemetrySnapshot.SCHEMA_4), schema4Bytes);
+		assertEquals(schema4Bytes.length, written);
+		assertTrue(new String(schema4Bytes, StandardCharsets.UTF_8).startsWith("{\"schema\":4,"));
+	}
+
+	@Test
+	public void theSchemaFourWriterSweepsOnlyItsOwnAbandonedTemporaryFiles() throws IOException
+	{
+		Files.createDirectories(directory);
+		Path abandoned = directory.resolve("state-v4-9876543210.tmp");
+		Files.write(abandoned, "abandoned".getBytes(StandardCharsets.UTF_8));
+		Files.setLastModifiedTime(abandoned, FileTime.fromMillis(NOW - 600_000L));
+
+		new TelemetrySnapshotWriter(directory, TelemetrySnapshot.SCHEMA_4, Files::move, () -> NOW)
+			.write(snapshot(0L, "LOGGED_IN"), new ReentrantLock(), ALWAYS);
+
+		assertFalse(Files.exists(abandoned));
+		assertTrue(Files.exists(directory.resolve("state-v4.json")));
+	}
+
 	/**
 	 * Schema 3 lands beside an earlier schema's file, never on top of it and never through it. The
 	 * old file is not read, not migrated, and not deleted, so a reader that still wants it finds it
