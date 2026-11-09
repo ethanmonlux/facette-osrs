@@ -33,6 +33,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
@@ -161,6 +162,23 @@ public class TelemetrySnapshotTest
 	 */
 	static TelemetrySnapshot populatedFixture()
 	{
+		return populatedFixtureBuilder().build();
+	}
+
+	/**
+	 * The populated schema-4 canonical document: the populated document on a boss task, so the boss
+	 * identifier is carried. A boss task carries no area, so {@code taskAreaId} is null here; the
+	 * area's carried shape is pinned by the tests below. The boss identifier is synthetic.
+	 */
+	static TelemetrySnapshot populatedSchema4Fixture()
+	{
+		return populatedFixtureBuilder()
+			.slayer(12, TelemetrySnapshot.SLAYER_BOSS_TASK_ID, 23, null)
+			.build();
+	}
+
+	private static TelemetrySnapshot.Builder populatedFixtureBuilder()
+	{
 		return TelemetrySnapshot.builder()
 			.envelope(INSTANCE_ID, 7L, EMITTED_AT)
 			.session(true, "LOGGED_IN", true, 302, 87, 1_769_999_940_000L)
@@ -179,8 +197,7 @@ public class TelemetrySnapshotTest
 			.account(0)
 			.quests(231)
 			.slayer(42, 494)
-			.grandExchange(fixtureGrandExchangeSlots())
-			.build();
+			.grandExchange(fixtureGrandExchangeSlots());
 	}
 
 	/**
@@ -696,6 +713,152 @@ public class TelemetrySnapshotTest
 			snapshot.toJson().contains("\"slayer\":{\"remaining\":0,\"taskCreatureId\":null}"));
 	}
 
+	// --- schema 4: the slayer boss and area ------------------------------------------------------
+
+	private static TelemetrySnapshot slayerSnapshot(Integer remaining, Integer creature,
+		Integer boss, Integer area)
+	{
+		return TelemetrySnapshot.builder()
+			.envelope(INSTANCE_ID, 1L, EMITTED_AT)
+			.session(true, "LOGGED_IN", true, 302, 87, EMITTED_AT)
+			.slayer(remaining, creature, boss, area)
+			.build();
+	}
+
+	/**
+	 * Schema 4 is schema 3 with a different version number and two keys appended to the slayer
+	 * object, and with nothing else different. Pinned for both canonical documents and for every
+	 * boss and area shape, so a key schema 4 moved, renamed, or dropped is caught here.
+	 */
+	@Test
+	public void theSchemaFourDocumentIsSchemaThreePlusTwoTrailingSlayerKeys()
+	{
+		TelemetrySnapshot[] snapshots = {
+			populatedFixture(),
+			populatedSchema4Fixture(),
+			loggedOutFixture(),
+			slayerSnapshot(0, null, null, null),
+			slayerSnapshot(42, 494, null, 7),
+			slayerSnapshot(12, TelemetrySnapshot.SLAYER_BOSS_TASK_ID, 23, null),
+			slayerSnapshot(12, TelemetrySnapshot.SLAYER_BOSS_TASK_ID, null, null),
+		};
+		for (TelemetrySnapshot snapshot : snapshots)
+		{
+			String schema3 = snapshot.toJson();
+			String schema4 = snapshot.toJson(TelemetrySnapshot.SCHEMA_4);
+			int slayer = schema3.indexOf("\"slayer\":{");
+			int slayerEnd = schema3.indexOf('}', slayer);
+			String expected = "{\"schema\":4" + schema3.substring("{\"schema\":3".length(), slayerEnd)
+				+ ",\"taskBossId\":" + valueOf(schema4, "taskBossId")
+				+ ",\"taskAreaId\":" + valueOf(schema4, "taskAreaId")
+				+ schema3.substring(slayerEnd);
+			assertEquals(expected, schema4);
+		}
+	}
+
+	/**
+	 * The schema-3 document is the same bytes whatever the boss and the area are. This is what lets
+	 * a reader that has not moved to schema 4 keep reading exactly what it read before.
+	 */
+	@Test
+	public void theSchemaThreeDocumentNeverCarriesTheBossOrTheArea()
+	{
+		TelemetrySnapshot withBoth = slayerSnapshot(12, TelemetrySnapshot.SLAYER_BOSS_TASK_ID, 23, 7);
+		TelemetrySnapshot withNeither =
+			slayerSnapshot(12, TelemetrySnapshot.SLAYER_BOSS_TASK_ID, null, null);
+		assertArrayEquals(withNeither.toJsonBytes(), withBoth.toJsonBytes());
+		assertFalse(withBoth.toJson().contains("taskBossId"));
+		assertFalse(withBoth.toJson().contains("taskAreaId"));
+		assertTrue(withBoth.toJson().contains(
+			"\"slayer\":{\"remaining\":12,\"taskCreatureId\":98},"));
+		assertTrue(withBoth.toJson().startsWith("{\"schema\":3,"));
+	}
+
+	@Test
+	public void aBossTaskCarriesItsBossAndAnAreaTaskItsArea()
+	{
+		assertTrue(slayerSnapshot(12, TelemetrySnapshot.SLAYER_BOSS_TASK_ID, 23, null)
+			.toJson(TelemetrySnapshot.SCHEMA_4).contains("\"slayer\":{\"remaining\":12,"
+				+ "\"taskCreatureId\":98,\"taskBossId\":23,\"taskAreaId\":null},"));
+		assertTrue(slayerSnapshot(42, 494, null, 7)
+			.toJson(TelemetrySnapshot.SCHEMA_4).contains("\"slayer\":{\"remaining\":42,"
+				+ "\"taskCreatureId\":494,\"taskBossId\":null,\"taskAreaId\":7},"));
+		// A boss of zero is carried as zero: whether an identifier names a boss is the reader's
+		// catalog's decision, and the producer does not round a reading it cannot judge to null.
+		assertTrue(slayerSnapshot(12, TelemetrySnapshot.SLAYER_BOSS_TASK_ID, 0, null)
+			.toJson(TelemetrySnapshot.SCHEMA_4).contains("\"taskBossId\":0,"));
+	}
+
+	/** Not reported is null, and a boss task with no boss reading still names its task. */
+	@Test
+	public void anUnreportedBossOrAreaIsNullAndTheGroupStaysSupported()
+	{
+		TelemetrySnapshot snapshot =
+			slayerSnapshot(12, TelemetrySnapshot.SLAYER_BOSS_TASK_ID, null, null);
+		assertEquals(TelemetryCapability.SUPPORTED, snapshot.capability("slayer"));
+		assertTrue(snapshot.toJson(TelemetrySnapshot.SCHEMA_4).contains("\"slayer\":{\"remaining\":12,"
+			+ "\"taskCreatureId\":98,\"taskBossId\":null,\"taskAreaId\":null},"));
+		assertTrue(slayerSnapshot(0, null, null, null).toJson(TelemetrySnapshot.SCHEMA_4)
+			.contains("\"slayer\":{\"remaining\":0,\"taskCreatureId\":null,"
+				+ "\"taskBossId\":null,\"taskAreaId\":null},"));
+		assertTrue(loggedOutFixture().toJson(TelemetrySnapshot.SCHEMA_4)
+			.contains("\"slayer\":{\"remaining\":null,\"taskCreatureId\":null,"
+				+ "\"taskBossId\":null,\"taskAreaId\":null},"));
+	}
+
+	/**
+	 * Every shape a boss or an area could take that describes no running task, or a task it does not
+	 * belong to, is refused at construction rather than exported.
+	 */
+	@Test
+	public void aBossOrAreaThatDescribesNoRunningTaskCannotBeBuilt()
+	{
+		Integer[][] refused = {
+			// remaining, creature, boss, area
+			{0, null, 23, null},
+			{0, null, null, 7},
+			{null, null, 23, null},
+			{null, null, null, 7},
+			{42, 494, 23, null},
+			{12, TelemetrySnapshot.SLAYER_BOSS_TASK_ID, -1, null},
+			{12, TelemetrySnapshot.SLAYER_BOSS_TASK_ID, null, 0},
+			{12, TelemetrySnapshot.SLAYER_BOSS_TASK_ID, null, -7},
+		};
+		for (Integer[] shape : refused)
+		{
+			try
+			{
+				slayerSnapshot(shape[0], shape[1], shape[2], shape[3]);
+				fail("must not build: " + Arrays.toString(shape));
+			}
+			catch (IllegalArgumentException expected)
+			{
+				assertTrue(expected.getMessage(), expected.getMessage().contains("slayer"));
+			}
+		}
+	}
+
+	@Test
+	public void onlySchemasThreeAndFourCanBeSerialized()
+	{
+		assertEquals(4, TelemetrySnapshot.SCHEMA_4);
+		assertEquals(98, TelemetrySnapshot.SLAYER_BOSS_TASK_ID);
+		assertTrue(populatedFixture().toJson(TelemetrySnapshot.SCHEMA_4).startsWith(
+			"{\"schema\":4,\"source\":\"runelite\","));
+		for (int schema : new int[]{1, 2, 5})
+		{
+			try
+			{
+				populatedFixture().toJson(schema);
+				fail("schema " + schema + " is not serializable");
+			}
+			catch (IllegalArgumentException expected)
+			{
+				// expected
+			}
+		}
+	}
+
 	@Test
 	public void anEmptyOfferSlotCarriesItsStateAndNothingElse()
 	{
@@ -983,7 +1146,7 @@ public class TelemetrySnapshotTest
 				Long.MAX_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE, Long.MAX_VALUE));
 		}
 
-		TelemetrySnapshot largest = TelemetrySnapshot.builder()
+		TelemetrySnapshot.Builder widest = TelemetrySnapshot.builder()
 			.envelope(repeat('I', TelemetrySnapshot.MAX_INSTANCE_ID_CHARS), Long.MAX_VALUE,
 				9_999_999_999_999L)
 			.session(true, repeat('G', TelemetrySnapshot.MAX_GAME_STATE_CHARS), true,
@@ -1002,8 +1165,8 @@ public class TelemetrySnapshotTest
 			.account(Integer.MAX_VALUE)
 			.quests(Integer.MAX_VALUE)
 			.slayer(Integer.MAX_VALUE, Integer.MAX_VALUE)
-			.grandExchange(maxOffers)
-			.build();
+			.grandExchange(maxOffers);
+		TelemetrySnapshot largest = widest.build();
 
 		int size = largest.toJsonBytes().length;
 		assertTrue("largest reachable document measured at " + size + " bytes, ceiling is "
@@ -1014,6 +1177,20 @@ public class TelemetrySnapshotTest
 		// production.
 		assertTrue("worst case " + size + " bytes leaves less than 2 KiB of headroom",
 			TelemetrySnapshotWriter.MAX_SNAPSHOT_BYTES - size >= 2_048);
+
+		// Schema 4 adds the boss and the area. A boss rides only on the two-digit boss task, so
+		// the widest schema-4 document is whichever of the two shapes is longer, and both are
+		// measured against the same ceiling and the same headroom.
+		int widestArea = widest
+			.slayer(Integer.MAX_VALUE, Integer.MAX_VALUE, null, Integer.MAX_VALUE)
+			.build().toJsonBytes(TelemetrySnapshot.SCHEMA_4).length;
+		int widestBoss = widest
+			.slayer(Integer.MAX_VALUE, TelemetrySnapshot.SLAYER_BOSS_TASK_ID, Integer.MAX_VALUE,
+				Integer.MAX_VALUE)
+			.build().toJsonBytes(TelemetrySnapshot.SCHEMA_4).length;
+		int schema4Size = Math.max(widestArea, widestBoss);
+		assertTrue("schema-4 worst case " + schema4Size + " bytes leaves less than 2 KiB of headroom",
+			TelemetrySnapshotWriter.MAX_SNAPSHOT_BYTES - schema4Size >= 2_048);
 	}
 
 	// --- envelope and construction rules -------------------------------------------------------

@@ -1,26 +1,31 @@
 # Facette Companion export schema
 
-The plugin writes one UTF-8 JSON object to a single local file. This document is the complete
-contract for **schema version 3**.
+The plugin writes one snapshot as two UTF-8 JSON documents, one per schema version, each to its own
+local file. This document is the complete contract for **schema version 3** and **schema version
+4**. Schema 4 is schema 3 plus two Slayer keys; everything below describes both unless a section
+says otherwise, and [Schema 4](#schema-4) lists every difference.
 
-| | |
-|---|---|
-| Path (Windows) | `%USERPROFILE%\.runelite\facette\state-v3.json` |
-| Path (other platforms) | `~/.runelite/facette/state-v3.json` |
-| Encoding | UTF-8, one JSON object, no trailing newline |
-| Maximum size | 24,576 bytes |
-| Configurable | No. There is one output path and it cannot be changed |
+| | Schema 3 | Schema 4 |
+|---|---|---|
+| Path (Windows) | `%USERPROFILE%\.runelite\facette\state-v3.json` | `%USERPROFILE%\.runelite\facette\state-v4.json` |
+| Path (other platforms) | `~/.runelite/facette/state-v3.json` | `~/.runelite/facette/state-v4.json` |
+| Encoding | UTF-8, one JSON object, no trailing newline | the same |
+| Maximum size | 24,576 bytes | the same |
+| Configurable | No. Neither path can be changed | the same |
 
-Two committed files are the canonical byte examples, and a test fails if the serializer and either
-file disagree:
+Four committed files are the canonical byte examples, and a test fails if the serializer and any of
+them disagree:
 
-- [`src/test/resources/facette-osrs-state-v3.json`](src/test/resources/facette-osrs-state-v3.json), a populated snapshot
+- [`src/test/resources/facette-osrs-state-v3.json`](src/test/resources/facette-osrs-state-v3.json), a populated schema-3 snapshot
 - [`src/test/resources/facette-osrs-state-v3-logged-out.json`](src/test/resources/facette-osrs-state-v3-logged-out.json), the same document carrying no player data
+- [`src/test/resources/facette-osrs-state-v4.json`](src/test/resources/facette-osrs-state-v4.json), a populated schema-4 snapshot, on a boss task
+- [`src/test/resources/facette-osrs-state-v4-logged-out.json`](src/test/resources/facette-osrs-state-v4-logged-out.json), the schema-4 document carrying no player data
 
 ## Serialization rules
 
-**Schema 3 contains only the fields documented below.** No other key appears. Future schema
-versions may add or change fields after separate review.
+**Schema 3 contains only the fields documented below, and schema 4 only those plus the two
+[schema-4](#schema-4) keys.** No other key appears in either. Future schema versions may add or
+change fields after separate review.
 
 **Schema 3 is schema 2 plus a suffix.** Every schema-2 key keeps its name, its position, and its
 meaning. The six groups schema 3 adds are appended after them, so a reader written against schema 2
@@ -42,7 +47,7 @@ the game's own enumeration order.
 
 | Field | Type | Bound | Meaning |
 |---|---|---|---|
-| `schema` | integer | n/a | Always `3`. |
+| `schema` | integer | n/a | `3` in `state-v3.json`, `4` in `state-v4.json`. |
 | `source` | string | n/a | Always `"runelite"`. |
 | `instanceId` | string | 36 chars | A random UUID generated fresh each time the plugin starts. Not derived from your account, profile, machine, or game state; it only lets a reader notice a restart. |
 | `seq` | integer | n/a | Increases by one for each snapshot that reached the file, starting at `0`. A refused or failed write does not consume a number, so the next attempt reuses it. |
@@ -324,6 +329,8 @@ group is shaped to prevent.
 identifier to a name, and the only other route to one is reading the chat, which this plugin does
 not do. The identifier is the trustworthy fact; naming it belongs to the reader.
 
+Schema 4 adds the boss and area identifiers to this group. See [Schema 4](#schema-4).
+
 ## `grandExchange`
 
 | Field | Type | Bound | Meaning |
@@ -354,6 +361,73 @@ client updates this view when the server tells it to, so it is your offers as th
 understands them rather than a live query.
 
 `price` appears here and nowhere else in the document. A test pins that.
+
+## Schema 4
+
+Schema 4 is schema 3 with `schema` reading `4` and two keys appended to the end of `slayer`. Every
+schema-3 key keeps its name, its position, and its meaning. Nothing else differs.
+
+### Why it is a separate file
+
+Schema 3 is closed: no key it does not document may appear in it. A reader written against it may
+refuse a document that carries an unknown key, and Facette's reader does. So the two keys cannot be
+added to `state-v3.json` without breaking every reader that already reads it. Instead
+`state-v3.json` stays the same document, byte for byte, and schema 4 is written beside it. A reader
+that has not moved never opens `state-v4.json`, so it never sees the new keys.
+
+### `slayer`, in schema 4
+
+| Field | Type | Meaning |
+|---|---|---|
+| `slayer.remaining` | integer or null | As in schema 3. |
+| `slayer.taskCreatureId` | integer or null | As in schema 3. |
+| `slayer.taskBossId` | integer or null | Which boss, on the boss task. `null` otherwise, and `null` when not reported. |
+| `slayer.taskAreaId` | integer or null | Which area the task was assigned to, when it was. `null` otherwise, and `null` when not reported. |
+
+**`taskBossId`** is the game's boss variable (`VarbitID.SLAYER_TARGET_BOSSID`), exported as it reads.
+It is carried only when the group is `supported`, `remaining` is above `0`, and `taskCreatureId` is
+`98`, the game's boss task. On any other task it is `null` whatever the variable holds, because the
+game leaves the last boss in that variable after the boss task ends. A boss task whose boss variable
+will not read carries `null`, and the group stays `supported`: the task is still named by
+`taskCreatureId`, and the boss is reported as not reported rather than guessed. Zero is exported as
+zero, not as `null`. Whether a value names a boss is the reader's catalog to decide.
+
+**`taskAreaId`** is the game's area variable (`VarPlayerID.SLAYER_AREA`), exported as it reads.
+It is carried only when the group is `supported`, `remaining` is above `0`, and the reading is above
+`0`. Zero is the game's "no area" (the same rule RuneLite's own Slayer plugin applies), so it is
+`null`, never an area called zero.
+
+**Neither ever decides whether the group is supported.** Both refine a task `taskCreatureId`
+already names, so a missing boss or area is a `null` beside a supported group, never an unavailable
+one. An `unavailable` group carries `null` in all four fields, and those nulls say nothing about any
+of them. Logout, world hop, finishing a task, and a task changing all clear both keys on the same
+sample as everything else in the group.
+
+**No boss or area name is exported**, for the reason no task name is: there is no first-party name
+this plugin can read without walking game data it does not otherwise touch. The identifiers are
+the facts, and a reader names them from a catalog it trusts. An identifier the reader cannot name is
+unknown, not a guess.
+
+### Publication of the two files
+
+Every publication writes `state-v3.json` first and `state-v4.json` second, from the same snapshot,
+so both carry the same `instanceId`, `seq`, and `emittedAt`. Each file is replaced on its own, as
+described in [Publication and freshness](#publication-and-freshness), so a reader that reads both
+can see them a moment apart.
+
+The sequence number is schema 3's. `state-v3.json` behaves exactly as described above. Schema 4 is
+written only after schema 3 has committed, so `state-v4.json` never carries a `seq` that a later
+document reuses for different content. A failed schema-4 write does not stop schema 3. The schema-4
+file then stays as it was until the next publication, which is the next change or the heartbeat,
+and its `seq` skips the numbers it missed. **A schema-4 reader must accept a `seq` that skips.**
+Within one `instanceId`, it never goes backwards and never repeats with different content.
+
+Read `state-v4.json` only when it is at least as new as `state-v3.json`: the same `instanceId` and a
+`seq` no lower than schema 3's. **A newer schema-3 document beats an older schema-4 one**, fresh or
+not. A schema-4 file with a lower `seq`, a different `instanceId`, or that is stale or missing while
+`state-v3.json` is fresh is a schema-4 write that failed, a previous plugin run, or an older build
+of this plugin. Read schema 3 instead, where both new keys are simply absent and so are not
+reported. Never combine the boss or area from an older schema-4 document with a newer schema-3 one.
 
 ## Logged-in completeness
 
@@ -412,7 +486,7 @@ with it and get a missing-file or sharing error. **Treat a failed open or a tran
 ## Schema history
 
 Schema 1 was used by earlier technical-alpha builds and is superseded. Schema 2 is superseded by
-schema 3. Current versions write only `state-v3.json`.
+schema 3. Current versions write `state-v3.json` and `state-v4.json`, and nothing else.
 
 **An earlier schema's file is left exactly as it was.** A `state-v1.json` or `state-v2.json`
 alongside the current file is not read, migrated, or deleted. It simply stops being updated, and a
@@ -432,4 +506,19 @@ For a reader, the move is:
 
 A reader that has not moved yet keeps working against whichever schema-2 build is installed for it.
 The two builds are separate installs of the plugin, not two files from one build: a client running
-this version writes `state-v3.json` and nothing else.
+a schema-2 build writes `state-v2.json` and nothing else.
+
+### Moving from schema 3 to schema 4
+
+Schema 3 is not superseded. It is written on every publication, unchanged, beside schema 4. For a
+reader, the move is:
+
+1. Read `state-v4.json` as well as `state-v3.json`. Validate each against its own schema.
+2. Everything schema 3 documented is present, unchanged, under the same key at the same position.
+   `schema` reads `4`, and `slayer` ends with `taskBossId` and `taskAreaId`.
+3. Accept a `seq` that skips numbers in `state-v4.json`. See
+   [Publication of the two files](#publication-of-the-two-files).
+4. Treat a stale, missing, or older `state-v4.json` as "no boss or area reported" and keep reading
+   schema 3, rather than treating it as the plugin being offline. Older means a different
+   `instanceId` or a lower `seq` than `state-v3.json`. A build older than this one writes no
+   schema-4 file at all.

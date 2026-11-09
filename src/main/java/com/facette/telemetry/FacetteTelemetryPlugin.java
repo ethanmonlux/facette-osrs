@@ -181,10 +181,12 @@ public class FacetteTelemetryPlugin extends Plugin
 	{
 		// A fresh identity every start, derived from nothing: not the account, profile, machine, or
 		// any game state. It only lets a reader notice a restart.
+		Path dataDirectory = dataDirectories.get();
 		PublisherRunContext run = PublisherRunContext.begin(
 			newestGeneration,
 			new TelemetryState(instanceIds.get(), wallClockMillis, elapsedNanos),
-			new TelemetrySnapshotWriter(dataDirectories.get()));
+			new TelemetrySnapshotWriter(dataDirectory, TelemetrySnapshot.SCHEMA),
+			new TelemetrySnapshotWriter(dataDirectory, TelemetrySnapshot.SCHEMA_4));
 		currentRun = run;
 
 		clientThread.invoke(() -> initializeOnClientThread(run));
@@ -416,10 +418,14 @@ public class FacetteTelemetryPlugin extends Plugin
 		int questPoints = client.getVarpValue(VarPlayerID.QP);
 		int slayerRemaining = client.getVarpValue(VarPlayerID.SLAYER_COUNT);
 		int slayerTaskCreatureId = client.getVarpValue(VarPlayerID.SLAYER_TARGET);
+		// Which boss, on the boss task, and which area, when the master assigned one. Both are read
+		// every tick and the state decides whether the task they would describe is running.
+		int slayerTaskBossId = client.getVarbitValue(VarbitID.SLAYER_TARGET_BOSSID);
+		int slayerTaskAreaId = client.getVarpValue(VarPlayerID.SLAYER_AREA);
 		List<TelemetryGrandExchangeSlot> grandExchangeSlots = readGrandExchangeSlots();
 
 		state.applySchema3Sample(skillStates, accountTypeId, questPoints, slayerRemaining,
-			slayerTaskCreatureId, grandExchangeSlots);
+			slayerTaskCreatureId, slayerTaskBossId, slayerTaskAreaId, grandExchangeSlots);
 	}
 
 	/**
@@ -780,11 +786,45 @@ public class FacetteTelemetryPlugin extends Plugin
 		{
 			// A newer run started while this one was writing; the target is untouched.
 			log.debug("Abandoned a telemetry snapshot superseded by a newer plugin run");
+			return;
 		}
 		catch (IOException e)
 		{
 			// Logged without the payload. The sequence did not advance, so this is retried.
 			log.warn("Unable to publish telemetry snapshot to {}", run.getWriter().getTarget(), e);
+			return;
+		}
+
+		// Schema 4 follows schema 3 and only once schema 3 has committed. The sequence is schema 3's,
+		// so writing schema 4 first could put a number on disk that a failed schema-3 write then
+		// reuses for different content. A schema-4 failure changes nothing about schema 3: its
+		// number is spent, and the next publication rewrites schema 4 under a higher one.
+		publishSchema4(run, snapshot);
+	}
+
+	private void publishSchema4(PublisherRunContext run, TelemetrySnapshot snapshot)
+	{
+		TelemetrySnapshotWriter schema4Writer = run.getSchema4Writer();
+		if (schema4Writer == null)
+		{
+			return;
+		}
+		try
+		{
+			int bytes = schema4Writer.write(snapshot, publishLock, run::isCommitAuthorized);
+			log.debug("Published schema-4 telemetry snapshot seq={} ({} bytes)",
+				snapshot.getSeq(), bytes);
+		}
+		catch (TelemetrySnapshotWriter.CommitNotAuthorizedException e)
+		{
+			// A newer run started while this one was writing; the target is untouched.
+			log.debug("Abandoned a telemetry snapshot superseded by a newer plugin run");
+		}
+		catch (IOException e)
+		{
+			// Logged without the payload. Schema 3 already holds this number, so the file is left
+			// for the next publication, a change or the heartbeat, to rewrite under a higher one.
+			log.warn("Unable to publish telemetry snapshot to {}", schema4Writer.getTarget(), e);
 		}
 	}
 

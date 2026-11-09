@@ -63,7 +63,10 @@ final class TelemetrySnapshotWriter
 	// that schema already knows how to notice.
 	static final String TARGET_FILE_NAME = "state-v3.json";
 
-	private static final String TEMP_PREFIX = "state-v3-";
+	// Schema 4's own file, written beside schema 3's rather than over it, so a schema-3 reader keeps
+	// reading exactly what it read before. Each writer owns one schema and sweeps only its own prefix.
+	static final String SCHEMA_4_TARGET_FILE_NAME = "state-v4.json";
+
 	private static final String TEMP_SUFFIX = ".tmp";
 
 	// Well above the publish interval, so a second client's in-flight file is never deleted.
@@ -101,7 +104,9 @@ final class TelemetrySnapshotWriter
 	}
 
 	private final Path directory;
+	private final int schema;
 	private final Path target;
+	private final String tempPrefix;
 	private final Mover mover;
 	private final LongSupplier clock;
 
@@ -109,13 +114,30 @@ final class TelemetrySnapshotWriter
 
 	TelemetrySnapshotWriter(Path directory)
 	{
-		this(directory, Files::move, System::currentTimeMillis);
+		this(directory, TelemetrySnapshot.SCHEMA);
+	}
+
+	TelemetrySnapshotWriter(Path directory, int schema)
+	{
+		this(directory, schema, Files::move, System::currentTimeMillis);
 	}
 
 	TelemetrySnapshotWriter(Path directory, Mover mover, LongSupplier clock)
 	{
+		this(directory, TelemetrySnapshot.SCHEMA, mover, clock);
+	}
+
+	TelemetrySnapshotWriter(Path directory, int schema, Mover mover, LongSupplier clock)
+	{
 		this.directory = Objects.requireNonNull(directory, "directory");
-		this.target = directory.resolve(TARGET_FILE_NAME);
+		if (schema != TelemetrySnapshot.SCHEMA && schema != TelemetrySnapshot.SCHEMA_4)
+		{
+			throw new IllegalArgumentException("no such schema: " + schema);
+		}
+		this.schema = schema;
+		this.target = directory.resolve(
+			schema == TelemetrySnapshot.SCHEMA ? TARGET_FILE_NAME : SCHEMA_4_TARGET_FILE_NAME);
+		this.tempPrefix = "state-v" + schema + "-";
 		this.mover = Objects.requireNonNull(mover, "mover");
 		this.clock = Objects.requireNonNull(clock, "clock");
 	}
@@ -136,7 +158,7 @@ final class TelemetrySnapshotWriter
 	{
 		Objects.requireNonNull(commitLock, "commitLock");
 		Objects.requireNonNull(commitAuthorized, "commitAuthorized");
-		byte[] payload = snapshot.toJsonBytes();
+		byte[] payload = snapshot.toJsonBytes(schema);
 		if (payload.length > MAX_SNAPSHOT_BYTES)
 		{
 			throw new SnapshotTooLargeException(payload.length);
@@ -145,7 +167,7 @@ final class TelemetrySnapshotWriter
 		Files.createDirectories(directory);
 		sweepStaleTemporaryFilesOnce();
 
-		Path temp = Files.createTempFile(directory, TEMP_PREFIX, TEMP_SUFFIX);
+		Path temp = Files.createTempFile(directory, tempPrefix, TEMP_SUFFIX);
 		try
 		{
 			try (FileChannel channel = FileChannel.open(temp,
@@ -216,7 +238,7 @@ final class TelemetrySnapshotWriter
 	{
 		long cutoff = clock.getAsLong() - STALE_TEMP_AGE_MILLIS;
 		try (DirectoryStream<Path> entries =
-				 Files.newDirectoryStream(directory, TEMP_PREFIX + "*" + TEMP_SUFFIX))
+				 Files.newDirectoryStream(directory, tempPrefix + "*" + TEMP_SUFFIX))
 		{
 			for (Path entry : entries)
 			{

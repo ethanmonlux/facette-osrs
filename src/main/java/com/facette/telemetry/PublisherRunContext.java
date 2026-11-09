@@ -47,6 +47,10 @@ final class PublisherRunContext
 	private final TelemetryState state;
 	private final TelemetrySnapshotWriter writer;
 
+	// Schema 4's file, written after schema 3's has committed. Null for a run that writes only
+	// schema 3.
+	private final TelemetrySnapshotWriter schema4Writer;
+
 	// False once this run has been retired. Never returns to true.
 	private final AtomicBoolean current = new AtomicBoolean(true);
 
@@ -58,12 +62,13 @@ final class PublisherRunContext
 	private Future<?> publishTask;
 
 	private PublisherRunContext(long generation, AtomicLong newestGeneration,
-		TelemetryState state, TelemetrySnapshotWriter writer)
+		TelemetryState state, TelemetrySnapshotWriter writer, TelemetrySnapshotWriter schema4Writer)
 	{
 		this.generation = generation;
 		this.newestGeneration = newestGeneration;
 		this.state = state;
 		this.writer = writer;
+		this.schema4Writer = schema4Writer;
 	}
 
 	// Claiming the generation at start rather than at first publication is what stops an older run
@@ -71,11 +76,17 @@ final class PublisherRunContext
 	static PublisherRunContext begin(AtomicLong newestGeneration, TelemetryState state,
 		TelemetrySnapshotWriter writer)
 	{
+		return begin(newestGeneration, state, writer, null);
+	}
+
+	static PublisherRunContext begin(AtomicLong newestGeneration, TelemetryState state,
+		TelemetrySnapshotWriter writer, TelemetrySnapshotWriter schema4Writer)
+	{
 		Objects.requireNonNull(newestGeneration, "newestGeneration");
 		Objects.requireNonNull(state, "state");
 		Objects.requireNonNull(writer, "writer");
 		return new PublisherRunContext(
-			newestGeneration.incrementAndGet(), newestGeneration, state, writer);
+			newestGeneration.incrementAndGet(), newestGeneration, state, writer, schema4Writer);
 	}
 
 	TelemetryState getState()
@@ -86,6 +97,12 @@ final class PublisherRunContext
 	TelemetrySnapshotWriter getWriter()
 	{
 		return writer;
+	}
+
+	/** Schema 4's writer, or null when this run writes only schema 3. */
+	TelemetrySnapshotWriter getSchema4Writer()
+	{
+		return schema4Writer;
 	}
 
 	// What protects the target file is commit authority, not this.
