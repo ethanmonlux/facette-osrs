@@ -485,7 +485,7 @@ with it and get a missing-file or sharing error. **Treat a failed open or a tran
 
 ## Schema history
 
-Schema 1 was used by earlier technical-alpha builds and is superseded. Schema 2 is superseded by
+Schema 1 was used by earlier prototype builds and is superseded. Schema 2 is superseded by
 schema 3. Current versions write `state-v3.json` and `state-v4.json`, and nothing else.
 
 **An earlier schema's file is left exactly as it was.** A `state-v1.json` or `state-v2.json`
