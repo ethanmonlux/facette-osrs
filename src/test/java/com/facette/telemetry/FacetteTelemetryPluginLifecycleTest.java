@@ -183,7 +183,7 @@ public class FacetteTelemetryPluginLifecycleTest
 			},
 			() -> elapsed,
 			() -> "instance-" + instanceCounter.incrementAndGet(),
-			() -> dataDirectory,
+			() -> new PathSnapshotStore(dataDirectory),
 			() ->
 			{
 				if (beforePublisherHandOver != null)

@@ -28,7 +28,6 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.AtomicMoveNotSupportedException;
-import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.util.Objects;
 import java.util.concurrent.locks.Lock;
@@ -36,15 +35,12 @@ import java.util.function.BooleanSupplier;
 import java.util.function.LongSupplier;
 
 /**
- * Writes one schema-5 file in the managed directory as a complete replacement, by the same rules
- * {@link TelemetrySnapshotWriter} applies to the legacy files: stage into a temporary sibling, force
- * it to disk, close it, check commit authority under the lock, then move it over the target,
- * atomically where the filesystem supports it. A reader sees the previous document or the new one,
- * never a partial one.
- *
- * It is a separate class rather than a mode of that writer on purpose. The legacy writer and its
- * directory are the frozen schema-3 and schema-4 path, and leaving them byte-for-byte alone is what
- * keeps a reader that has not moved unaffected.
+ * Writes one file in the plugin's managed directory as a complete replacement: stage into a
+ * temporary sibling, force it to disk, close it, check commit authority under the lock, then move it
+ * over the target, atomically where the filesystem supports it. A reader sees the previous document
+ * or the new one, never a partial one. Every file the plugin writes goes through here, and every
+ * filesystem operation goes through the {@link SnapshotStore}, which in production is RuneLite's
+ * {@code Filepath}.
  */
 final class ManagedFileWriter
 {
@@ -133,10 +129,10 @@ final class ManagedFileWriter
 			{
 				if (!commitAuthorized.getAsBoolean())
 				{
-					// The same exception the legacy writer throws, so the publisher treats an
-					// overtaken write of either kind as "did not reach the file".
+					// One exception for every file, so the publisher treats any overtaken write
+					// as "did not reach the file".
 					throw new TelemetrySnapshotWriter.CommitNotAuthorizedException(
-						Paths.get(fileName));
+						store.describe(fileName));
 				}
 				replaceTarget(temp);
 			}

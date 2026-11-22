@@ -26,7 +26,7 @@ file adds.
 ## Architecture
 
 The plugin reads RuneLite client state on the client thread and writes one local JSON snapshot,
-as schema-versioned files in two directories, plus a separately bounded account document. A separately installed reader picks the files up on its own. Nothing flows back: the plugin
+as schema-versioned files in its RuneLite-managed directory, plus a separately bounded account document. A separately installed reader picks the files up on its own. Nothing flows back: the plugin
 performs no gameplay input, accepts no commands, and makes no network requests.
 
 Keep contributions inside that shape.

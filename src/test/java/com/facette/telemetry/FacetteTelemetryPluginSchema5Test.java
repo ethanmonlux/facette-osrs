@@ -84,10 +84,13 @@ public class FacetteTelemetryPluginSchema5Test
 	private ScheduledExecutorService executor;
 	private Runnable scheduledTask;
 	private final List<Runnable> executorQueue = new ArrayList<>();
-	private Path legacyDirectory;
 	private Path managedDirectory;
 	private PathSnapshotStore managedStore;
 	private boolean managedDirectoryAvailable = true;
+	// When set, opening the managed directory throws instead, as RuneLite's move of an earlier
+	// version's directory can when another client is doing the same.
+	private boolean managedDirectoryThrows;
+	private int managedDirectoryRequests;
 	private long now = 1_770_000_000_000L;
 	private long elapsed;
 	private FacetteTelemetryPlugin plugin;
@@ -116,7 +119,6 @@ public class FacetteTelemetryPluginSchema5Test
 			return null;
 		}).when(executor).execute(any(Runnable.class));
 
-		legacyDirectory = temporaryFolder.newFolder("facette").toPath();
 		managedDirectory = temporaryFolder.getRoot().toPath()
 			.resolve("plugin-data").resolve("facette-companion");
 		managedStore = new PathSnapshotStore(managedDirectory);
@@ -142,8 +144,17 @@ public class FacetteTelemetryPluginSchema5Test
 
 		AtomicInteger sessions = new AtomicInteger();
 		plugin = new FacetteTelemetryPlugin(() -> now, () -> elapsed, () -> "instance-1",
-			() -> legacyDirectory, () -> executor,
-			() -> managedDirectoryAvailable ? managedStore : null,
+			() -> executor,
+			() ->
+			{
+				managedDirectoryRequests++;
+				if (managedDirectoryThrows)
+				{
+					throw new java.io.UncheckedIOException(
+						new java.nio.file.NoSuchFileException(".runelite/facette"));
+				}
+				return managedDirectoryAvailable ? managedStore : null;
+			},
 			() -> "session-" + sessions.incrementAndGet());
 		plugin.client = client;
 		plugin.clientThread = clientThread;
@@ -191,7 +202,7 @@ public class FacetteTelemetryPluginSchema5Test
 
 	private String stateV3() throws IOException
 	{
-		return read(legacyDirectory.resolve("state-v3.json"));
+		return read(managedDirectory.resolve("state-v3.json"));
 	}
 
 	/**
@@ -438,14 +449,64 @@ public class FacetteTelemetryPluginSchema5Test
 		assertAccountDocumentObservesNothing();
 	}
 
+	/** Every file is in the managed directory, side by side, from one publication. */
 	@Test
-	public void anUnavailableManagedDirectoryLeavesTheLegacyFilesPublishing() throws IOException
+	public void everyFileIsWrittenInTheManagedDirectory() throws IOException
+	{
+		start();
+		publish();
+		assertTrue(stateV3().contains("\"schema\":3,"));
+		assertTrue(read(managedDirectory.resolve("state-v4.json")).contains("\"schema\":4,"));
+		assertTrue(stateV5().contains("\"schema\":5,"));
+		assertTrue(stateV3().contains("\"seq\":0,") && stateV5().contains("\"seq\":0,"));
+	}
+
+	/**
+	 * Without the managed directory there is nowhere the plugin may write, so it writes nothing,
+	 * spends no sequence number, and asks for the directory only on the publisher thread and only
+	 * once per retry interval.
+	 */
+	@Test
+	public void anUnavailableManagedDirectoryWritesNothingAnywhere() throws IOException
 	{
 		managedDirectoryAvailable = false;
 		start();
+		assertEquals("startup never opens the directory", 0, managedDirectoryRequests);
 		publish();
-		assertTrue(stateV3().contains("\"gameState\":\"LOGGED_IN\""));
-		assertTrue(read(legacyDirectory.resolve("state-v4.json")).contains("\"schema\":4"));
-		assertFalse(Files.exists(managedDirectory.resolve("state-v5.json")));
+		publish();
+		assertEquals("asked once, then not again within the retry interval", 1, managedDirectoryRequests);
+		assertFalse(Files.exists(managedDirectory));
+		try (java.util.stream.Stream<Path> files = Files.walk(temporaryFolder.getRoot().toPath()))
+		{
+			assertTrue("no file anywhere", files.noneMatch(Files::isRegularFile));
+		}
+	}
+
+	/**
+	 * A directory that cannot be opened once, for example because another client is moving an
+	 * earlier version's directory into place at the same moment, is asked for again after the retry
+	 * interval, and publishing then starts normally with the first sequence number.
+	 */
+	@Test
+	public void aDirectoryThatFailsToOpenIsRetriedAndPublishingResumes() throws IOException
+	{
+		managedDirectoryThrows = true;
+		start();
+		publish();
+		assertEquals(1, managedDirectoryRequests);
+		assertFalse(Files.exists(managedDirectory.resolve("state-v3.json")));
+
+		managedDirectoryThrows = false;
+		now += ManagedExport.RETRY_INTERVAL_MILLIS - 1L;
+		publish();
+		assertEquals("not before the retry interval", 1, managedDirectoryRequests);
+
+		now += 1L;
+		publish();
+		assertEquals(2, managedDirectoryRequests);
+		assertTrue(stateV3().contains("\"seq\":0,"));
+		assertTrue(stateV5().contains("\"loggedIn\":true"));
+		publish();
+		assertEquals("once open, the directory is not asked for again", 2, managedDirectoryRequests);
 	}
 }
