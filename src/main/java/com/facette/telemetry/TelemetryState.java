@@ -32,8 +32,10 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.TreeMap;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.function.LongSupplier;
+import java.util.function.Supplier;
 
 /**
  * The single in-memory current snapshot, plus the rules that decide when it is published. Holds no
@@ -82,6 +84,106 @@ final class TelemetryState
 	// so events can arrive before any baseline exists, and seeding from live totals afterwards would
 	// absorb every gain that landed in that window.
 	private final Map<String, RetainedXp> preInitialXp = new HashMap<>();
+
+	// Schema 5. Mints the random character-session identifier; never derived from the account.
+	private final Supplier<String> characterSessionIds;
+
+	// Whether this state builds a schema-5 view beside the gated snapshot.
+	private final boolean schema5Enabled;
+
+	private final TelemetryAccountState account;
+
+	/**
+	 * How one schema-5 group was last read: the sample that first read the value it carries, the
+	 * latest sample that read it, and whether the latest sample did. Kept apart from the values so
+	 * the schema-3 and schema-4 documents are built exactly as before.
+	 */
+	private static final class GroupTracker
+	{
+		private Long firstReadAt;
+		private Long lastReadAt;
+		private boolean current;
+
+		// Returns whether the exported observation changed.
+		private boolean read(boolean valueChanged, long atMillis)
+		{
+			if (current && !valueChanged && firstReadAt != null)
+			{
+				lastReadAt = atMillis;
+				return false;
+			}
+			firstReadAt = atMillis;
+			lastReadAt = atMillis;
+			current = true;
+			return true;
+		}
+
+		// The value stays, but this sample did not re-read it.
+		private boolean lose()
+		{
+			if (!current)
+			{
+				return false;
+			}
+			current = false;
+			return true;
+		}
+
+		private boolean clear()
+		{
+			boolean changed = current || firstReadAt != null;
+			firstReadAt = null;
+			lastReadAt = null;
+			current = false;
+			return changed;
+		}
+
+		/**
+		 * Current while the latest sample read it; observed when a value is held that an earlier
+		 * sample read; otherwise not observed for a container and unavailable for anything else.
+		 */
+		private TelemetryGroupObservation observation(boolean holdsValue, boolean container)
+		{
+			if (current && firstReadAt != null)
+			{
+				return TelemetryGroupObservation.current(firstReadAt);
+			}
+			if (holdsValue && lastReadAt != null)
+			{
+				return TelemetryGroupObservation.observed(lastReadAt);
+			}
+			return container
+				? TelemetryGroupObservation.NONE_NOT_OBSERVED
+				: TelemetryGroupObservation.NONE_UNAVAILABLE;
+		}
+	}
+
+	private final GroupTracker vitalsRead = new GroupTracker();
+	private final GroupTracker combatRead = new GroupTracker();
+	private final GroupTracker equipmentRead = new GroupTracker();
+	private final GroupTracker inventoryRead = new GroupTracker();
+	private final GroupTracker skillsRead = new GroupTracker();
+	private final GroupTracker accountRead = new GroupTracker();
+	private final GroupTracker questsRead = new GroupTracker();
+	private final GroupTracker slayerRead = new GroupTracker();
+	private final GroupTracker grandExchangeRead = new GroupTracker();
+
+	// The character session schema 5 reports. Survives a world hop and a loading screen; discarded at
+	// a session boundary.
+	private String characterSessionId;
+
+	// Whether a live sample has run since the client last reached the logged-in state. This, not the
+	// game state, is what schema 5's loggedIn reports.
+	private boolean sampledSinceLogin;
+
+	// The wall-clock time of the sample in progress, so every group a sample reads carries one time.
+	private Long sampleAtMillis;
+
+	// Game ticks sampled in this character session, for pacing the account reads.
+	private long sessionTicks;
+
+	// The account revision committed for the current character session, or null.
+	private Long committedAccountRevision;
 
 	private static final class TrackedSkillGain
 	{
@@ -234,11 +336,137 @@ final class TelemetryState
 
 	TelemetryState(String instanceId, LongSupplier wallClockMillis, LongSupplier elapsedNanos)
 	{
+		this(instanceId, wallClockMillis, elapsedNanos, false, 0, () -> UUID.randomUUID().toString());
+	}
+
+	/**
+	 * A state that also builds the schema-5 view of each publication, with the given number of quests
+	 * in its catalogue and the given source of character-session identifiers.
+	 */
+	TelemetryState(String instanceId, LongSupplier wallClockMillis, LongSupplier elapsedNanos,
+		boolean schema5Enabled, int questCatalogueSize, Supplier<String> characterSessionIds)
+	{
 		this.instanceId = Objects.requireNonNull(instanceId, "instanceId");
 		this.wallClockMillis = Objects.requireNonNull(wallClockMillis, "wallClockMillis");
 		this.elapsedNanos = Objects.requireNonNull(elapsedNanos, "elapsedNanos");
+		this.schema5Enabled = schema5Enabled;
+		this.characterSessionIds = Objects.requireNonNull(characterSessionIds, "characterSessionIds");
+		this.account = new TelemetryAccountState(
+			instanceId, questCatalogueSize, wallClockMillis, elapsedNanos);
 		// Elapsed readings carry no meaningful origin, so the first interval is measured from here.
 		this.lastPublishAtElapsedNanos = elapsedNanos.getAsLong();
+	}
+
+	TelemetryAccountState getAccount()
+	{
+		return account;
+	}
+
+	boolean isSchema5Enabled()
+	{
+		return schema5Enabled;
+	}
+
+	synchronized String getCharacterSessionId()
+	{
+		return characterSessionId;
+	}
+
+	/**
+	 * Opens a sample: every group read until {@link #endSample(boolean)} carries this time. Returns the
+	 * character session the sample belongs to when the client is logged in, minting one for a session
+	 * that has none yet, and null otherwise.
+	 */
+	synchronized String beginSample()
+	{
+		sampleAtMillis = wallClockMillis.getAsLong();
+		if (!loggedIn)
+		{
+			return null;
+		}
+		if (characterSessionId == null)
+		{
+			characterSessionId = set(characterSessionId, characterSessionIds.get());
+			sessionTicks = 0L;
+			committedAccountRevision = null;
+		}
+		account.beginSession(characterSessionId);
+		return characterSessionId;
+	}
+
+	/**
+	 * Closes a sample. A logged-in sample that completed is what makes schema 5 report the character;
+	 * one that threw part-way through does not.
+	 */
+	synchronized void endSample(boolean completed)
+	{
+		if (completed && loggedIn && characterSessionId != null)
+		{
+			sampledSinceLogin = set(sampledSinceLogin, true);
+		}
+		sampleAtMillis = null;
+	}
+
+	/** Counts a sampled game tick of the current character session and returns the count. */
+	synchronized long countSessionTick()
+	{
+		if (characterSessionId == null)
+		{
+			return 0L;
+		}
+		return ++sessionTicks;
+	}
+
+	/** Whether the client's skill totals were read on the latest sample. */
+	synchronized boolean isSkillsCurrent()
+	{
+		return loggedIn && skillsRead.current;
+	}
+
+	/**
+	 * Records that an account revision reached the file. Accepted only for the session it describes,
+	 * so a revision written for a session that has since ended is never referenced by a later one.
+	 */
+	synchronized void recordAccountCommitted(String sessionId, long revision)
+	{
+		if (sessionId == null || !sessionId.equals(characterSessionId))
+		{
+			return;
+		}
+		committedAccountRevision = set(committedAccountRevision, Long.valueOf(revision));
+	}
+
+	/**
+	 * Ends the character session without a logout: RuneLite reported a different RuneScape profile,
+	 * such as a move between a standard and a seasonal world. Everything tied to the session goes,
+	 * exactly as at a logout, and the next sample starts a new one.
+	 */
+	synchronized void endCharacterSession()
+	{
+		boolean wasLoggedIn = loggedIn;
+		updateSession(gameState, false, true);
+		loggedIn = set(loggedIn, wasLoggedIn);
+	}
+
+	private long observationTime()
+	{
+		return sampleAtMillis != null ? sampleAtMillis : wallClockMillis.getAsLong();
+	}
+
+	private void track(GroupTracker tracker, boolean valueChanged)
+	{
+		if (tracker.read(valueChanged, observationTime()))
+		{
+			markDirty();
+		}
+	}
+
+	private void untrack(GroupTracker tracker, boolean clearValue)
+	{
+		if (clearValue ? tracker.clear() : tracker.lose())
+		{
+			markDirty();
+		}
 	}
 
 	String getInstanceId()
@@ -294,6 +522,10 @@ final class TelemetryState
 			lastChangedAt = null;
 			trackingStartedAt = set(trackingStartedAt, null);
 			lastReportedXpOrder = 0L;
+			characterSessionId = set(characterSessionId, null);
+			committedAccountRevision = set(committedAccountRevision, null);
+			sessionTicks = 0L;
+			account.endSession();
 		}
 	}
 
@@ -321,6 +553,7 @@ final class TelemetryState
 		{
 			return;
 		}
+		long before = version;
 		hitpointsCurrent = set(hitpointsCurrent, hpCurrent);
 		hitpointsBase = set(hitpointsBase, hpBase);
 		prayerCurrent = set(prayerCurrent, prayCurrent);
@@ -331,18 +564,26 @@ final class TelemetryState
 		weightKg = set(weightKg, rawWeightKg >= WEIGHT_MIN_KG && rawWeightKg <= WEIGHT_MAX_KG
 			? Integer.valueOf(rawWeightKg)
 			: null);
+		track(vitalsRead, version != before);
 	}
 
 	// A null style is a steady state, but a null prayer list is refused: "not read" and "none
 	// active" are different claims.
 	synchronized boolean updateCombat(String style, List<String> prayers)
 	{
-		if (!loggedIn || prayers == null)
+		if (!loggedIn)
 		{
 			return false;
 		}
+		if (prayers == null)
+		{
+			untrack(combatRead, false);
+			return false;
+		}
+		long before = version;
 		attackStyle = set(attackStyle, style);
 		activePrayers = set(activePrayers, Collections.unmodifiableList(new ArrayList<>(prayers)));
+		track(combatRead, version != before);
 		return true;
 	}
 
@@ -350,28 +591,49 @@ final class TelemetryState
 	{
 		if (loggedIn)
 		{
+			long before = version;
 			target = set(target, npcTarget);
+			// The target is part of the combat group, so a new one is a new combat reading.
+			if (version != before && combatRead.current)
+			{
+				track(combatRead, true);
+			}
 		}
 	}
 
 	// Any other size is refused rather than padded, which would claim slots never reported.
 	synchronized boolean updateEquipment(List<TelemetryItemSlot> slots)
 	{
-		if (!loggedIn || slots == null || slots.size() != TelemetrySnapshot.EQUIPMENT_SLOTS.size())
+		if (!loggedIn)
 		{
 			return false;
 		}
+		if (slots == null || slots.size() != TelemetrySnapshot.EQUIPMENT_SLOTS.size())
+		{
+			// The last reading stays, as it always has for schemas 3 and 4. Schema 5 says it was
+			// not re-read rather than presenting it as current.
+			untrack(equipmentRead, false);
+			return false;
+		}
+		long before = version;
 		equipmentSlots = set(equipmentSlots, Collections.unmodifiableList(new ArrayList<>(slots)));
+		track(equipmentRead, version != before);
 		return true;
 	}
 
 	// Occupancy counts slots holding an item, never quantity.
 	synchronized boolean updateInventory(List<TelemetryItemSlot> slots)
 	{
-		if (!loggedIn || slots == null || slots.size() != INVENTORY_CAPACITY)
+		if (!loggedIn)
 		{
 			return false;
 		}
+		if (slots == null || slots.size() != INVENTORY_CAPACITY)
+		{
+			untrack(inventoryRead, false);
+			return false;
+		}
+		long before = version;
 		List<TelemetryItemSlot> next = Collections.unmodifiableList(new ArrayList<>(slots));
 		int occupied = 0;
 		for (TelemetryItemSlot slot : next)
@@ -384,6 +646,7 @@ final class TelemetryState
 		usedSlots = set(usedSlots, occupied);
 		freeSlots = set(freeSlots, INVENTORY_CAPACITY - occupied);
 		inventorySlots = set(inventorySlots, next);
+		track(inventoryRead, version != before);
 		return true;
 	}
 
@@ -450,7 +713,9 @@ final class TelemetryState
 			clearSkillStates();
 			return;
 		}
+		long before = version;
 		skillStates = set(skillStates, Collections.unmodifiableList(new ArrayList<>(states)));
+		track(skillsRead, version != before);
 	}
 
 	/**
@@ -467,9 +732,12 @@ final class TelemetryState
 		if (typeId < 0)
 		{
 			accountTypeId = set(accountTypeId, null);
+			untrack(accountRead, true);
 			return;
 		}
+		long before = version;
 		accountTypeId = set(accountTypeId, Integer.valueOf(typeId));
+		track(accountRead, version != before);
 	}
 
 	private void applyQuestPoints(int points)
@@ -481,9 +749,12 @@ final class TelemetryState
 		if (points < 0)
 		{
 			questPoints = set(questPoints, null);
+			untrack(questsRead, true);
 			return;
 		}
+		long before = version;
 		questPoints = set(questPoints, Integer.valueOf(points));
+		track(questsRead, version != before);
 	}
 
 	/**
@@ -520,6 +791,7 @@ final class TelemetryState
 		}
 		boolean running = remaining > 0;
 		boolean bossTask = running && taskCreatureId == TelemetrySnapshot.SLAYER_BOSS_TASK_ID;
+		long before = version;
 		slayerRemaining = set(slayerRemaining, Integer.valueOf(remaining));
 		slayerTaskCreatureId =
 			set(slayerTaskCreatureId, running ? Integer.valueOf(taskCreatureId) : null);
@@ -527,6 +799,7 @@ final class TelemetryState
 			set(slayerTaskBossId, bossTask && taskBossId >= 0 ? Integer.valueOf(taskBossId) : null);
 		slayerTaskAreaId =
 			set(slayerTaskAreaId, running && taskAreaId > 0 ? Integer.valueOf(taskAreaId) : null);
+		track(slayerRead, version != before);
 	}
 
 	private void applyGrandExchange(List<TelemetryGrandExchangeSlot> slots)
@@ -540,8 +813,10 @@ final class TelemetryState
 			clearGrandExchange();
 			return;
 		}
+		long before = version;
 		grandExchangeSlots =
 			set(grandExchangeSlots, Collections.unmodifiableList(new ArrayList<>(slots)));
+		track(grandExchangeRead, version != before);
 	}
 
 	/**
@@ -565,6 +840,7 @@ final class TelemetryState
 	private void clearSkillStates()
 	{
 		skillStates = set(skillStates, null);
+		untrack(skillsRead, true);
 	}
 
 	private void clearSlayerTask()
@@ -573,11 +849,13 @@ final class TelemetryState
 		slayerTaskCreatureId = set(slayerTaskCreatureId, null);
 		slayerTaskBossId = set(slayerTaskBossId, null);
 		slayerTaskAreaId = set(slayerTaskAreaId, null);
+		untrack(slayerRead, true);
 	}
 
 	private void clearGrandExchange()
 	{
 		grandExchangeSlots = set(grandExchangeSlots, null);
+		untrack(grandExchangeRead, true);
 	}
 
 	/**
@@ -852,8 +1130,15 @@ final class TelemetryState
 		// Player-derived values are exported only when the client is live, the plugin is running,
 		// and a sample has populated them, whatever the fields currently hold.
 		boolean live = pluginActive && loggedIn && playerStateComplete;
+		long emittedAt = wallClockMillis.getAsLong();
 		TelemetrySnapshot.Builder b = TelemetrySnapshot.builder()
-			.envelope(instanceId, nextSeq, wallClockMillis.getAsLong());
+			.envelope(instanceId, nextSeq, emittedAt);
+		if (schema5Enabled)
+		{
+			// Built under the same monitor from the same fields, so the two views of one
+			// publication can never describe two different moments.
+			b.schema5View(schema5View(pluginActive, emittedAt));
+		}
 
 		if (live)
 		{
@@ -892,6 +1177,106 @@ final class TelemetryState
 	}
 
 	/**
+	 * The schema-5 document for this publication. A character is reported once the client is logged
+	 * in and this session has been sampled, whatever containers the client has provided; each player
+	 * group then says for itself whether the latest sample read it.
+	 */
+	private TelemetrySnapshot schema5View(boolean pluginActive, long emittedAt)
+	{
+		TelemetrySnapshot.Builder b = TelemetrySnapshot.builder()
+			.envelope(instanceId, nextSeq, emittedAt);
+		boolean recognized = pluginActive && loggedIn && sampledSinceLogin
+			&& characterSessionId != null;
+		if (!recognized)
+		{
+			List<TelemetryGroupObservation> none = new ArrayList<>();
+			for (int i = 0; i < TelemetrySnapshot.SCHEMA_5_GROUPS.size(); i++)
+			{
+				none.add(TelemetryGroupObservation.NONE_UNAVAILABLE);
+			}
+			return b.session(pluginActive, gameState, false, null, null, null)
+				.vitals(null, null, null, null, null, null, null)
+				.combat(null, null, null)
+				.equipment(null)
+				.inventory(null, null, null)
+				.xp(null, null, null, null)
+				.skills(null)
+				.account(null)
+				.quests(null)
+				.slayer(null, null)
+				.grandExchange(null)
+				.schema5(pluginActive ? characterSessionId : null,
+					pluginActive ? TelemetrySnapshot.LOGGED_OUT : TelemetrySnapshot.INACTIVE,
+					Collections.emptyList(), none, null)
+				.build();
+		}
+
+		TelemetryGroupObservation vitals = vitalsRead.observation(hitpointsBase != null, false);
+		boolean combatHeld = activePrayers != null;
+		TelemetryGroupObservation combat = combatRead.observation(combatHeld, false);
+		TelemetryGroupObservation equipment =
+			equipmentRead.observation(equipmentSlots != null, true);
+		TelemetryGroupObservation inventory =
+			inventoryRead.observation(inventorySlots != null, true);
+
+		List<String> missing = new ArrayList<>();
+		if (combatLevel == null)
+		{
+			missing.add("combatLevel");
+		}
+		if (!vitals.isCurrent())
+		{
+			missing.add("vitals");
+		}
+		if (!combat.isCurrent())
+		{
+			missing.add("combat");
+		}
+		if (!equipment.isCurrent())
+		{
+			missing.add("equipment");
+		}
+		if (!inventory.isCurrent())
+		{
+			missing.add("inventory");
+		}
+		String readiness = missing.isEmpty()
+			? TelemetrySnapshot.READY
+			: missing.contains("combatLevel") || missing.contains("vitals")
+				? TelemetrySnapshot.LOADING
+				: TelemetrySnapshot.PARTIAL;
+
+		List<TelemetryGroupObservation> groups = new ArrayList<>();
+		groups.add(vitals);
+		groups.add(combat);
+		groups.add(equipment);
+		groups.add(inventory);
+		groups.add(skillsRead.observation(skillStates != null, false));
+		groups.add(accountRead.observation(accountTypeId != null, false));
+		groups.add(questsRead.observation(questPoints != null, false));
+		groups.add(slayerRead.observation(slayerRemaining != null, false));
+		groups.add(grandExchangeRead.observation(grandExchangeSlots != null, false));
+
+		boolean vitalsHeld = vitals.getObservedAt() != null;
+		return b.session(true, gameState, true, world, combatLevel, trackingStartedAt)
+			.vitals(vitalsHeld ? hitpointsCurrent : null, vitalsHeld ? hitpointsBase : null,
+				vitalsHeld ? prayerCurrent : null, vitalsHeld ? prayerBase : null,
+				vitalsHeld ? runEnergyPercent : null, vitalsHeld ? specialAttackPercent : null,
+				vitalsHeld ? weightKg : null)
+			.combat(combatHeld ? attackStyle : null, activePrayers, combatHeld ? target : null)
+			.equipment(equipmentSlots)
+			.inventory(usedSlots, freeSlots, inventorySlots)
+			.xp(lastSkill, lastDelta, lastChangedAt, exportedSkillGains())
+			.skills(skillStates)
+			.account(accountTypeId)
+			.quests(questPoints)
+			.slayer(slayerRemaining, slayerTaskCreatureId, slayerTaskBossId, slayerTaskAreaId)
+			.grandExchange(grandExchangeSlots)
+			.schema5(characterSessionId, readiness, missing, groups, committedAccountRevision)
+			.build();
+	}
+
+	/**
 	 * Records that the preceding snapshot reached the file. The sequence advances only here, so a
 	 * refused or failed write leaves the number for the retry.
 	 */
@@ -908,6 +1293,11 @@ final class TelemetryState
 	private void clearPlayerDerived()
 	{
 		playerStateComplete = set(playerStateComplete, false);
+		sampledSinceLogin = set(sampledSinceLogin, false);
+		untrack(vitalsRead, true);
+		untrack(combatRead, true);
+		untrack(equipmentRead, true);
+		untrack(inventoryRead, true);
 		world = set(world, null);
 		combatLevel = set(combatLevel, null);
 		hitpointsCurrent = set(hitpointsCurrent, null);

@@ -51,6 +51,12 @@ import java.util.Objects;
  * Schema 3 is closed, and Facette's schema-3 reader refuses any key it does not know, so the boss and
  * area identifiers cannot be added to it. The schema-3 document is unchanged, byte for byte, and a
  * reader that has not moved to schema 4 never sees the new keys.
+ *
+ * Schema 5 is schema 4 plus a character-session identifier and three trailing keys, and is written
+ * to the managed directory rather than beside the other two. It is serialized from a second snapshot
+ * that carries partial player data: there, a recognized character is logged in whatever containers
+ * the client has provided, and each group says for itself whether it is current. The schema-3 and
+ * schema-4 documents are built from the gated snapshot exactly as before.
  */
 final class TelemetrySnapshot
 {
@@ -58,6 +64,29 @@ final class TelemetrySnapshot
 
 	// Schema 3 plus the slayer boss and area identifiers. Written beside schema 3, never instead of it.
 	static final int SCHEMA_4 = 4;
+
+	// Schema 4 plus the character session, readiness, per-group observations and the account
+	// revision. Written to the managed directory, never instead of the legacy files.
+	static final int SCHEMA_5 = 5;
+
+	// The one account document a schema-5 snapshot can reference.
+	static final String ACCOUNT_FILE_NAME = "account-v5.json";
+
+	// The groups a schema-5 document reports under "groups", in their document order.
+	static final List<String> SCHEMA_5_GROUPS = Collections.unmodifiableList(Arrays.asList(
+		"vitals", "combat", "equipment", "inventory", "skills", "account", "quests", "slayer",
+		"grandExchange"));
+
+	// What "readiness.missing" may name, in its order. A closed list, so a diagnostic can never grow
+	// into something that carries data.
+	static final List<String> READINESS_ITEMS = Collections.unmodifiableList(Arrays.asList(
+		"combatLevel", "vitals", "combat", "equipment", "inventory"));
+
+	static final String READY = "ready";
+	static final String PARTIAL = "partial";
+	static final String LOADING = "loading";
+	static final String LOGGED_OUT = "logged_out";
+	static final String INACTIVE = "inactive";
 
 	// The task identifier the game uses for "a boss of your choice". The boss is then named by a
 	// separate variable, which describes nothing on any other task. The value is the one RuneLite's
@@ -145,6 +174,17 @@ final class TelemetrySnapshot
 
 	private final List<TelemetryGrandExchangeSlot> grandExchangeSlots;
 
+	// Schema 5 only. Null on a snapshot that is not a schema-5 view.
+	private final String characterSessionId;
+	private final String readinessState;
+	private final List<String> readinessMissing;
+	private final List<TelemetryGroupObservation> groupObservations;
+	private final Long accountRevision;
+
+	// The schema-5 view of the same publication, attached to the gated snapshot. Null when this run
+	// writes no schema-5 file.
+	private final TelemetrySnapshot schema5View;
+
 	private TelemetrySnapshot(Builder b)
 	{
 		this.instanceId = Objects.requireNonNull(b.instanceId, "instanceId");
@@ -197,6 +237,34 @@ final class TelemetrySnapshot
 		this.skillGains = copySkillGains(b.skillGains, emittedAt);
 		this.skillStates = copyOrNull(b.skillStates, "skill state");
 		this.grandExchangeSlots = copyOrNull(b.grandExchangeSlots, "grand exchange slot");
+
+		this.characterSessionId = b.characterSessionId;
+		this.readinessState = b.readinessState;
+		this.accountRevision = b.accountRevision;
+		this.schema5View = b.schema5View;
+		if (readinessState == null)
+		{
+			if (b.readinessMissing != null || b.groupObservations != null || accountRevision != null
+				|| characterSessionId != null)
+			{
+				throw new IllegalArgumentException("schema-5 fields need a readiness state");
+			}
+			this.readinessMissing = null;
+			this.groupObservations = null;
+		}
+		else
+		{
+			this.readinessMissing = copyReadinessMissing(b.readinessMissing);
+			this.groupObservations = copyGroupObservations(b.groupObservations, emittedAt);
+			if (accountRevision != null && accountRevision < 1)
+			{
+				throw new IllegalArgumentException("an account revision starts at 1");
+			}
+		}
+		if (schema5View != null && schema5View.readinessState == null)
+		{
+			throw new IllegalArgumentException("a schema-5 view needs its schema-5 fields");
+		}
 
 		if (usedSlots != null || freeSlots != null)
 		{
@@ -267,6 +335,32 @@ final class TelemetrySnapshot
 		return loggedIn;
 	}
 
+	/** The schema-5 view of this publication, or null when this run writes no schema-5 file. */
+	TelemetrySnapshot getSchema5View()
+	{
+		return schema5View;
+	}
+
+	String getReadinessState()
+	{
+		return readinessState;
+	}
+
+	List<String> getReadinessMissing()
+	{
+		return readinessMissing;
+	}
+
+	String getCharacterSessionId()
+	{
+		return characterSessionId;
+	}
+
+	Long getAccountRevision()
+	{
+		return accountRevision;
+	}
+
 	/** The schema-3 document. Key order and key set are fixed here and are the contract Facette reads. */
 	String toJson()
 	{
@@ -280,9 +374,13 @@ final class TelemetrySnapshot
 	 */
 	String toJson(int schema)
 	{
-		if (schema != SCHEMA && schema != SCHEMA_4)
+		if (schema != SCHEMA && schema != SCHEMA_4 && schema != SCHEMA_5)
 		{
 			throw new IllegalArgumentException("no such schema: " + schema);
+		}
+		if (schema == SCHEMA_5 && readinessState == null)
+		{
+			throw new IllegalStateException("this snapshot is not a schema-5 view");
 		}
 		StringBuilder sb = new StringBuilder(4_096);
 		sb.append('{');
@@ -299,6 +397,11 @@ final class TelemetrySnapshot
 		num(sb, "world", world).append(',');
 		num(sb, "combatLevel", combatLevel).append(',');
 		num(sb, "trackingStartedAt", trackingStartedAt);
+		if (schema == SCHEMA_5)
+		{
+			sb.append(',');
+			str(sb, "characterSessionId", characterSessionId, MAX_INSTANCE_ID_CHARS);
+		}
 		sb.append("},");
 
 		key(sb, "vitals").append('{');
@@ -362,7 +465,7 @@ final class TelemetrySnapshot
 		key(sb, "slayer").append('{');
 		num(sb, "remaining", slayerRemaining).append(',');
 		num(sb, "taskCreatureId", slayerTaskCreatureId);
-		if (schema == SCHEMA_4)
+		if (schema == SCHEMA_4 || schema == SCHEMA_5)
 		{
 			sb.append(',');
 			num(sb, "taskBossId", slayerTaskBossId).append(',');
@@ -375,8 +478,61 @@ final class TelemetrySnapshot
 		appendGrandExchangeSlots(sb);
 		sb.append('}');
 
+		if (schema == SCHEMA_5)
+		{
+			appendSchema5Suffix(sb);
+		}
+
 		sb.append('}');
 		return sb.toString();
+	}
+
+	/** What schema 5 appends after the schema-4 body: readiness, the groups, the account reference. */
+	private void appendSchema5Suffix(StringBuilder sb)
+	{
+		sb.append(',');
+		key(sb, "readiness").append('{');
+		str(sb, "state", readinessState, readinessState.length()).append(',');
+		key(sb, "missing").append('[');
+		for (int i = 0; i < readinessMissing.size(); i++)
+		{
+			if (i > 0)
+			{
+				sb.append(',');
+			}
+			String item = readinessMissing.get(i);
+			appendString(sb, item, item.length());
+		}
+		sb.append("]},");
+
+		key(sb, "groups").append('{');
+		for (int i = 0; i < SCHEMA_5_GROUPS.size(); i++)
+		{
+			if (i > 0)
+			{
+				sb.append(',');
+			}
+			TelemetryGroupObservation observation = groupObservations.get(i);
+			key(sb, SCHEMA_5_GROUPS.get(i)).append('{');
+			str(sb, "availability", observation.getAvailability(),
+				observation.getAvailability().length()).append(',');
+			num(sb, "observedAt", observation.getObservedAt());
+			sb.append('}');
+		}
+		sb.append("},");
+
+		key(sb, "accountData");
+		if (accountRevision == null)
+		{
+			sb.append("null");
+		}
+		else
+		{
+			sb.append('{');
+			str(sb, "file", ACCOUNT_FILE_NAME, ACCOUNT_FILE_NAME.length()).append(',');
+			num(sb, "revision", accountRevision);
+			sb.append('}');
+		}
 	}
 
 	/**
@@ -633,7 +789,7 @@ final class TelemetrySnapshot
 	 * exported string passes through, so no caller can opt out. A truncation that would split a
 	 * surrogate pair steps back one character.
 	 */
-	private static StringBuilder appendString(StringBuilder sb, String value, int maxChars)
+	static StringBuilder appendString(StringBuilder sb, String value, int maxChars)
 	{
 		int length = value.length();
 		if (length > maxChars)
@@ -684,6 +840,43 @@ final class TelemetrySnapshot
 			}
 		}
 		return sb.append('"');
+	}
+
+	// Only names from the closed readiness list, each once and in that list's order.
+	private static List<String> copyReadinessMissing(List<String> missing)
+	{
+		Objects.requireNonNull(missing, "readinessMissing");
+		List<String> copy = new ArrayList<>(missing.size());
+		int lastIndex = -1;
+		for (String item : missing)
+		{
+			int index = READINESS_ITEMS.indexOf(item);
+			if (index <= lastIndex)
+			{
+				throw new IllegalArgumentException("readiness item out of order or unknown: " + item);
+			}
+			lastIndex = index;
+			copy.add(item);
+		}
+		return Collections.unmodifiableList(copy);
+	}
+
+	private static List<TelemetryGroupObservation> copyGroupObservations(
+		List<TelemetryGroupObservation> observations, long emittedAt)
+	{
+		Objects.requireNonNull(observations, "groupObservations");
+		if (observations.size() != SCHEMA_5_GROUPS.size())
+		{
+			throw new IllegalArgumentException("schema 5 reports exactly "
+				+ SCHEMA_5_GROUPS.size() + " groups, got " + observations.size());
+		}
+		List<TelemetryGroupObservation> copy = new ArrayList<>(observations.size());
+		for (TelemetryGroupObservation observation : observations)
+		{
+			// An observation later than emission would describe the future.
+			copy.add(Objects.requireNonNull(observation, "group observation").atMost(emittedAt));
+		}
+		return Collections.unmodifiableList(copy);
 	}
 
 	private static Long atMost(Long value, long ceiling)
@@ -787,6 +980,12 @@ final class TelemetrySnapshot
 		private Integer slayerTaskBossId;
 		private Integer slayerTaskAreaId;
 		private List<TelemetryGrandExchangeSlot> grandExchangeSlots;
+		private String characterSessionId;
+		private String readinessState;
+		private List<String> readinessMissing;
+		private List<TelemetryGroupObservation> groupObservations;
+		private Long accountRevision;
+		private TelemetrySnapshot schema5View;
 
 		private Builder()
 		{
@@ -898,6 +1097,26 @@ final class TelemetrySnapshot
 		Builder grandExchange(List<TelemetryGrandExchangeSlot> slots)
 		{
 			this.grandExchangeSlots = slots;
+			return this;
+		}
+
+		/** The schema-5 additions. Setting them makes this snapshot a schema-5 view. */
+		Builder schema5(String characterSessionId, String readinessState,
+			List<String> readinessMissing, List<TelemetryGroupObservation> groupObservations,
+			Long accountRevision)
+		{
+			this.characterSessionId = characterSessionId;
+			this.readinessState = Objects.requireNonNull(readinessState, "readinessState");
+			this.readinessMissing = readinessMissing;
+			this.groupObservations = groupObservations;
+			this.accountRevision = accountRevision;
+			return this;
+		}
+
+		/** Attaches the schema-5 view of the same publication to the gated snapshot. */
+		Builder schema5View(TelemetrySnapshot view)
+		{
+			this.schema5View = view;
 			return this;
 		}
 

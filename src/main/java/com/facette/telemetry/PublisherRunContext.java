@@ -51,6 +51,9 @@ final class PublisherRunContext
 	// schema 3.
 	private final TelemetrySnapshotWriter schema4Writer;
 
+	// Schema 5's managed-directory output, or null when this run writes none.
+	private final ManagedExport managedExport;
+
 	// False once this run has been retired. Never returns to true.
 	private final AtomicBoolean current = new AtomicBoolean(true);
 
@@ -62,13 +65,15 @@ final class PublisherRunContext
 	private Future<?> publishTask;
 
 	private PublisherRunContext(long generation, AtomicLong newestGeneration,
-		TelemetryState state, TelemetrySnapshotWriter writer, TelemetrySnapshotWriter schema4Writer)
+		TelemetryState state, TelemetrySnapshotWriter writer, TelemetrySnapshotWriter schema4Writer,
+		ManagedExport managedExport)
 	{
 		this.generation = generation;
 		this.newestGeneration = newestGeneration;
 		this.state = state;
 		this.writer = writer;
 		this.schema4Writer = schema4Writer;
+		this.managedExport = managedExport;
 	}
 
 	// Claiming the generation at start rather than at first publication is what stops an older run
@@ -82,11 +87,18 @@ final class PublisherRunContext
 	static PublisherRunContext begin(AtomicLong newestGeneration, TelemetryState state,
 		TelemetrySnapshotWriter writer, TelemetrySnapshotWriter schema4Writer)
 	{
+		return begin(newestGeneration, state, writer, schema4Writer, null);
+	}
+
+	static PublisherRunContext begin(AtomicLong newestGeneration, TelemetryState state,
+		TelemetrySnapshotWriter writer, TelemetrySnapshotWriter schema4Writer,
+		ManagedExport managedExport)
+	{
 		Objects.requireNonNull(newestGeneration, "newestGeneration");
 		Objects.requireNonNull(state, "state");
 		Objects.requireNonNull(writer, "writer");
-		return new PublisherRunContext(
-			newestGeneration.incrementAndGet(), newestGeneration, state, writer, schema4Writer);
+		return new PublisherRunContext(newestGeneration.incrementAndGet(), newestGeneration, state,
+			writer, schema4Writer, managedExport);
 	}
 
 	TelemetryState getState()
@@ -106,6 +118,12 @@ final class PublisherRunContext
 	}
 
 	// What protects the target file is commit authority, not this.
+	/** Schema 5's output, or null when this run writes only the legacy files. */
+	ManagedExport getManagedExport()
+	{
+		return managedExport;
+	}
+
 	boolean isCurrent()
 	{
 		return current.get();
