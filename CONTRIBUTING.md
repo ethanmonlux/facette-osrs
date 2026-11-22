@@ -41,8 +41,8 @@ Open an issue before writing the code. A schema change needs:
 1. a version bump, since new fields, removed fields, renamed keys, changed types, changed
    nullability, and changed ordering are all schema changes;
 2. [SCHEMA.md](SCHEMA.md) updated in the same change;
-3. both fixtures under `src/test/resources/` regenerated, since tests hold the serializer and the
-   fixtures to the same bytes;
+3. the affected fixtures under `src/test/resources/` regenerated, since tests hold the serializer
+   and the fixtures to the same bytes;
 4. coordination with the consuming application, which reads those fixtures as its contract.
 
 ## Dependencies
@@ -76,4 +76,4 @@ account material in a report, an issue, a pull request, or a log. Nothing here n
 Before attaching a snapshot, read it and decide whether you are comfortable sharing the gameplay
 state it contains. No file includes account identity or credentials, but each includes the
 gameplay fields documented in [SCHEMA.md](SCHEMA.md), and `account-v5.json` includes your bank and
-Seed Vault contents when you have opened them, and your quest, diary and Combat Achievement progress.
+Seed Vault contents when you have opened them, your quest states, and your diary and Combat Achievement tier completion.

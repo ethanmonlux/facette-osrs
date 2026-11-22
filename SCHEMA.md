@@ -668,8 +668,8 @@ commits one clearing revision with `characterSessionId: null` and every group `n
 previous character's bank does not remain on disk as if current. Nothing in this file survives into
 the next character session.
 
-If RuneLite closes, crashes or is killed while a character is logged in, no clearing write
-happens and the last revision stays on disk. Its `instanceId` belongs to a run that has ended, so
+If RuneLite closes, crashes or is killed while a character is logged in, the clearing write may
+not happen (RuneLite does not stop plugins on exit) and the last revision can stay on disk. Its `instanceId` belongs to a run that has ended, so
 no state file of a later run references it. When the plugin next starts and can write its managed
 directory, its first account write replaces the file, on its first publication (retried until it
 succeeds), with a revision of the new run in which every group

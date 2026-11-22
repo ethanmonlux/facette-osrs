@@ -100,8 +100,8 @@ import net.runelite.client.plugins.PluginDescriptor;
 	// it. No legacyDataDirectory is set on purpose: that would move .runelite/facette, which readers
 	// of schemas 3 and 4 still watch.
 	internalName = "facette-companion",
-	description = "Exports your live game state, bank and Seed Vault when you open them, and quest, "
-		+ "diary and Combat Achievement progress to documented local JSON files. "
+	description = "Exports your live game state, bank and Seed Vault when you open them, quest "
+		+ "states, and diary and Combat Achievement tier completion to documented local JSON files. "
 		+ "Facette is an optional reader. Read-only; no network requests.",
 	tags = {"facette", "companion", "second screen", "local file", "telemetry"}
 )

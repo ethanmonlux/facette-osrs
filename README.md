@@ -84,11 +84,12 @@ Schema 5 also writes a separate account document, updated only when something in
   six Combat Achievement tiers is complete. No individual diary or Combat Achievement task, and no
   Combat Achievement points total, is exported.
 
-All of it belongs to the current login only. It is cleared when you log out, change to a different
-RuneScape profile, or disable the plugin, and nothing is carried into the next login. If RuneLite
-closes or crashes while you are logged in, the last account document stays on disk until the
-plugin next starts and can write its folder, when its first write replaces it with an empty one. To remove it sooner,
-delete the file (see below).
+All of it belongs to the current login only. It is cleared when you log out or change to a
+different RuneScape profile, and as you disable the plugin (that last write is best-effort, like the
+final snapshot described below), and nothing is carried into the next login. If RuneLite closes or
+crashes while you are logged in, the last account document can stay on disk until the plugin next
+starts and can write its folder, when its first write replaces it with one in which nothing is
+observed. To remove it sooner, delete the file (see below).
 
 ### Not exported
 
@@ -144,9 +145,9 @@ every gameplay-derived field `null`, and then writes nothing further.
 
 That final write is asynchronous and best-effort. It is handed to the plugin's own publisher thread
 so that disabling the plugin never makes the client wait on the filesystem, and that thread is a
-daemon, so it cannot hold the client open. If you are closing RuneLite rather than only disabling
-the plugin, the client can therefore exit before the write happens, leaving the file at its last
-active snapshot. If RuneLite is killed, no final snapshot is written either. In every one of those
+daemon, so it cannot hold the client open. Closing RuneLite is not disabling the plugin: RuneLite
+does not stop plugins when it exits, so no final snapshot is written and the files stay at their
+last active snapshot. If RuneLite is killed, no final snapshot is written either. In every one of those
 cases the file simply stops being updated, so treat it as stale once `emittedAt` stops advancing
 rather than waiting for an inactive snapshot that may never arrive. What the plugin never does is
 report an orderly shutdown that did not happen.
@@ -160,7 +161,7 @@ To remove the exported data, delete the two directories:
 
 Deleting them removes the exported files, including the account document, and nothing else. The plugin keeps no history, database, log
 of your play, or copy of the data anywhere else. If the plugin is still enabled, it recreates the
-directory and the file on its next publication.
+directories and the files on its next publication.
 
 ## Contributor workflow
 
@@ -192,7 +193,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the boundaries a change has to stay i
 Open an issue. Before attaching a snapshot, read it and decide whether you are comfortable sharing
 the gameplay state it contains. No file includes account identity or credentials, but each includes
 the fields documented in [SCHEMA.md](SCHEMA.md), and `account-v5.json` includes your bank and Seed
-Vault contents when you have opened them, and your quest, diary and Combat Achievement progress.
+Vault contents when you have opened them, your quest states, and your diary and Combat Achievement tier completion.
 
 ## License and affiliation
 
