@@ -1,8 +1,8 @@
 # Facette Companion export schema
 
-The plugin writes one snapshot as two UTF-8 JSON documents, one per schema version, each to its own
-local file. This document is the complete contract for **schema version 3** and **schema version
-4**. Schema 4 is schema 3 plus two Slayer keys; everything below describes both unless a section
+The plugin writes one snapshot as UTF-8 JSON documents, one per schema version, each to its own
+local file. This document is the complete contract for **schema version 3**, **schema version
+4** and, in its own section, **[schema version 5](#schema-5)**. Schema 4 is schema 3 plus two Slayer keys; everything below describes both unless a section
 says otherwise, and [Schema 4](#schema-4) lists every difference.
 
 | | Schema 3 | Schema 4 |
@@ -486,7 +486,8 @@ with it and get a missing-file or sharing error. **Treat a failed open or a tran
 ## Schema history
 
 Schema 1 was used by earlier prototype builds and is superseded. Schema 2 is superseded by
-schema 3. Current versions write `state-v3.json` and `state-v4.json`, and nothing else.
+schema 3. Current versions write `state-v3.json` and `state-v4.json` in the legacy directory and
+the [schema 5](#schema-5) `state-v5.json` in the managed directory, and nothing else.
 
 **An earlier schema's file is left exactly as it was.** A `state-v1.json` or `state-v2.json`
 alongside the current file is not read, migrated, or deleted. It simply stops being updated, and a
@@ -522,3 +523,139 @@ reader, the move is:
    schema 3, rather than treating it as the plugin being offline. Older means a different
    `instanceId` or a lower `seq` than `state-v3.json`. A build older than this one writes no
    schema-4 file at all.
+
+## Schema 5
+
+Schema 5 is a separate document in RuneLite's managed plugin directory. It exists for a reason
+schema 4 cannot serve: a logged-in character must be recognized even when the client has not
+provided every container. Schemas 3 and 4 are unchanged: same directory, same bytes, same
+all-or-nothing `loggedIn` rule.
+
+| | `state-v5.json` |
+|---|---|
+| Path (Windows) | `%USERPROFILE%\.runelite\plugin-data\facette-companion\state-v5.json` |
+| Path (other platforms) | `~/.runelite/plugin-data/facette-companion/state-v5.json` |
+| Written by | RuneLite's managed file API (`Plugin.getPluginDirectory()`, internal name `facette-companion`) |
+| Cadence | every change, at most four times a second, and a heartbeat at least every two seconds |
+| Maximum size | 32,768 bytes |
+| Configurable | No |
+
+This build writes no other file in that directory. It reads no bank, Seed Vault, per-quest,
+Achievement Diary or Combat Achievement value.
+
+The legacy directory is not moved. The plugin sets no `legacyDataDirectory`, so RuneLite never
+relocates `.runelite/facette`, and `state-v3.json` and `state-v4.json` keep being written there for
+readers that have not moved. Both directories are written by one plugin run with the same
+`instanceId` and `seq`.
+
+Three committed files are the canonical byte examples, and a test fails if the serializer and any
+of them disagree:
+
+- [`src/test/resources/facette-osrs-state-v5.json`](src/test/resources/facette-osrs-state-v5.json), a ready snapshot
+- [`src/test/resources/facette-osrs-state-v5-partial.json`](src/test/resources/facette-osrs-state-v5-partial.json), a logged-in character whose worn-items container the client has not provided (full inventory, nothing worn)
+- [`src/test/resources/facette-osrs-state-v5-logged-out.json`](src/test/resources/facette-osrs-state-v5-logged-out.json), no player data
+
+### `state-v5.json`
+
+The document is schema 4's document with `schema` reading `5`, one key appended to `session`, and
+three keys appended after `grandExchange`. Key order is fixed. No other key appears.
+
+| Addition | Type | Meaning |
+|---|---|---|
+| `session.characterSessionId` | string (36 chars) or null | A random UUID minted when this plugin run first samples a logged-in character, and discarded at the next session boundary: logout, a new login, or a RuneScape profile change (for example moving between a standard and a seasonal world). A world hop or loading screen keeps it. Never derived from the account, its name, its hash, or RuneLite's profile key; two sessions of the same character get unrelated values. `null` whenever `pluginActive` is `false` or no session has been sampled. |
+| `readiness` | object | What a reader may conclude about the character right now. See [`readiness`](#readiness). |
+| `groups` | object | Per-group availability and original observation time for the groups this document carries. See [`groups`](#groups). |
+| `accountData` | null | Always `null`. This build writes no account document, so there is nothing to reference. |
+
+**`session.loggedIn` changes meaning in schema 5, and only here.** In schemas 3 and 4 it says that
+every required player value was read. In schema 5 it says the client is at `LOGGED_IN` and this run
+has sampled the session: the character is recognized. Each player group then answers for itself
+under `groups`. This is the login-recognition repair: a character with nothing worn, an empty backpack, no
+experience gained and no input since login is `loggedIn: true` in schema 5 on its first sample,
+whatever containers the client has or has not provided.
+
+**Whenever `loggedIn` is `false`, every player-derived value is `null`** exactly as in schema 4,
+every `capabilities` entry is `unavailable`, every `groups` entry is `unavailable` with
+`observedAt: null`, and `readiness.missing` is empty.
+
+**Whenever `loggedIn` is `true`**, `characterSessionId` and `trackingStartedAt` are non-null and
+`world` is non-null. Every other player value follows its group:
+
+| Group | Carried when | `null` when |
+|---|---|---|
+| `vitals` | the sample read it (`current`) | `unavailable` |
+| `combat` | `activePrayers` was read (`current`) | `unavailable`; `attackStyle` and `target` are then `null` too |
+| `equipment` | the client provided the worn-items container this sample (`current`), or did earlier since the character came into view and has not since (`observed`) | `not_observed`: the client has not provided the container since the character last came into view (login, world hop or loading screen) |
+| `inventory` | as `equipment`, for the backpack container | as `equipment` |
+| `skills`, `account`, `quests`, `slayer`, `grandExchange` | as schema 4: `supported` and `current` | `unavailable` |
+
+`xp` follows `loggedIn` exactly as in schema 4.
+
+**A container the client has not provided is never reported as empty.** RuneLite's
+`Client.getItemContainer` is nullable, and nothing in its API distinguishes "not sent yet" from
+"nothing in it" for a character who logged in wearing nothing. Schema 5 reports that state as
+`not_observed`, with `slots: null`, and keeps the character recognized. A container the client
+provides with no items in it is a confirmed empty container: eleven or twenty-eight empty entries,
+`current`. An empty container read in this session replaces any earlier populated one.
+
+**`observed` is a retained reading, never a fresh one.** When a container the client provided
+earlier stops being provided, the last reading stays, its `observedAt` becomes the last sample that
+read it, and its availability becomes `observed`. It is never carried across a session boundary, a
+world hop or a loading screen, and never refreshed by a heartbeat.
+
+#### `readiness`
+
+| Field | Type | Meaning |
+|---|---|---|
+| `readiness.state` | string | `ready`, `partial`, `loading`, `logged_out`, or `inactive`. |
+| `readiness.missing` | array of strings | The ordered subset of `combatLevel`, `vitals`, `combat`, `equipment`, `inventory` that is not current. Empty unless `state` is `partial` or `loading`. |
+
+| `state` | When |
+|---|---|
+| `inactive` | `pluginActive` is `false`. |
+| `logged_out` | `pluginActive` is `true` and `loggedIn` is `false` (login screen, loading, hopping, or not yet sampled). |
+| `loading` | `loggedIn` is `true` and `missing` contains `combatLevel` or `vitals`. |
+| `partial` | `loggedIn` is `true`, `missing` is not empty, and neither of the above. The character is recognized; the named groups are not current. |
+| `ready` | `loggedIn` is `true` and `missing` is empty. |
+
+The plugin logs, at info level, each change of `readiness.state` together with `missing`, and
+never any part of the payload. That line is the diagnostic for a character that is logged in but
+not fully read: it names the reading that is missing.
+
+#### `groups`
+
+Always present, always carrying exactly one entry per group in this order: `vitals`, `combat`,
+`equipment`, `inventory`, `skills`, `account`, `quests`, `slayer`, `grandExchange`. Each entry is
+`{"availability": ..., "observedAt": ...}`.
+
+| `availability` | Meaning | `observedAt` |
+|---|---|---|
+| `current` | Read on the latest sample, and every sample since `observedAt` read the same value. | the first sample that read the value it carries |
+| `observed` | Retained from an earlier sample; not re-read since. | the last sample that read it |
+| `not_observed` | Not read since the character last came into view (login, world hop or loading screen). | `null` |
+| `unavailable` | The latest read failed, or there is no session. | `null` |
+
+`observedAt` is never later than `emittedAt` and never moves forward without a new read. A reader
+must treat an unrecognized availability value as not current.
+
+### Reader selection between the two directories
+
+1. Read `state-v5.json` from the managed directory. When it is valid and fresh by the rule in
+   [Publication and freshness](#publication-and-freshness), it is the source, and nothing from the
+   legacy directory is combined with it.
+2. Otherwise read the legacy directory exactly as for schemas 4, 3 and 2.
+3. A stale file in either directory is never selected, so a previous run cannot be revived by the
+   other directory going quiet.
+
+A reader that only knows schemas 3 and 4 keeps working unchanged against this build: it never opens
+the managed directory, and it sees the same documents it saw before, including `loggedIn: false`
+while a container is missing. A schema-5 reader against an older build finds no managed directory
+and falls back to the legacy files.
+
+### Moving from schema 4 to schema 5
+
+1. Read `state-v5.json` from the managed directory first; fall back to the legacy files.
+2. Recognize the character from `session.loggedIn` and present `readiness`; read each player group
+   only through its `groups` entry.
+3. Treat `not_observed` as unknown, never as empty.
+4. Expect `accountData` to be `null`. This build writes no account document.

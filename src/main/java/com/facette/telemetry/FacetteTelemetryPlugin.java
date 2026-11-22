@@ -58,17 +58,22 @@ import net.runelite.api.NPC;
 import net.runelite.api.ParamID;
 import net.runelite.api.Player;
 import net.runelite.api.Prayer;
+import net.runelite.api.Quest;
+import net.runelite.api.QuestState;
 import net.runelite.api.Skill;
 import net.runelite.api.StructComposition;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.GameTick;
+import net.runelite.api.events.ItemContainerChanged;
 import net.runelite.api.events.StatChanged;
 import net.runelite.api.gameval.InventoryID;
+import net.runelite.api.gameval.ItemID;
 import net.runelite.api.gameval.VarPlayerID;
 import net.runelite.api.gameval.VarbitID;
 import net.runelite.client.RuneLite;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.eventbus.Subscribe;
+import net.runelite.client.events.RuneScapeProfileChanged;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 
@@ -79,13 +84,22 @@ import net.runelite.client.plugins.PluginDescriptor;
  * reads are legal, and publication runs on a separate thread per run. Schema 3 accepts only an NPC
  * target, so an interacted-with player is discarded here at the point of reading.
  *
- * Every read here is a plain accessor or a variable lookup. Nothing runs a client script, walks the
- * widget tree, or reads the chat, and the sampling cost of a tick does not grow with how much the
- * account has done.
+ * Every per-tick read here is a plain accessor or a variable lookup. Nothing walks the widget tree,
+ * opens an interface, or reads the chat, and the sampling cost of a tick does not grow with how much
+ * the account has done.
+ *
+ * The schema-5 account document (bank, Seed Vault, per-quest state, diary and Combat Achievement
+ * tiers) is switched off in this build. Its code below is unreachable: the plugin never reads any of
+ * those, never runs the quest-status script, and never writes {@code account-v5.json}, so every
+ * schema-5 state file carries {@code "accountData": null}.
  */
 @Slf4j
 @PluginDescriptor(
 	name = "Facette Companion",
+	// The Plugin Hub name. RuneLite derives the managed directory, plugin-data/facette-companion, from
+	// it. No legacyDataDirectory is set on purpose: that would move .runelite/facette, which readers
+	// of schemas 3 and 4 still watch.
+	internalName = "facette-companion",
 	description = "Exports your live game state to one documented local JSON file. "
 		+ "Facette is an optional reader. Read-only; no network requests.",
 	tags = {"facette", "companion", "second screen", "local file", "telemetry"}
@@ -128,6 +142,72 @@ public class FacetteTelemetryPlugin extends Plugin
 	// reading rather than a level anyone has.
 	private static final int MIN_REAL_SKILL_LEVEL = 1;
 
+	// A schema-5 account document is written at most this often, and only after something changed.
+	private static final long ACCOUNT_WRITE_INTERVAL_MILLIS = 2_000L;
+
+	// Account progress is read from this sampled tick of a character session on, so the login
+	// variable sync has arrived first.
+	private static final long PROGRESS_FIRST_TICK = 2L;
+
+	// Diary and Combat Achievement tiers are re-read every this many sampled ticks.
+	private static final long PROGRESS_REFRESH_TICKS = 10L;
+
+	// Quests read per tick, round-robin. A full pass of today's catalogue takes about ten ticks.
+	private static final int QUESTS_PER_TICK = 24;
+
+	// RuneLite's quest catalogue as this build was compiled against it.
+	private static final Quest[] QUEST_CATALOGUE = Quest.values();
+
+	// The game's tier-completion variable for each diary region and tier, in the order
+	// TelemetryAccountState.DIARY_REGIONS and DIARY_TIERS name them. RuneLite's Varbits.DIARY_*.
+	static final int[][] DIARY_TIER_VARBITS = {
+		{VarbitID.ARDOUGNE_DIARY_EASY_COMPLETE, VarbitID.ARDOUGNE_DIARY_MEDIUM_COMPLETE,
+			VarbitID.ARDOUGNE_DIARY_HARD_COMPLETE, VarbitID.ARDOUGNE_DIARY_ELITE_COMPLETE},
+		{VarbitID.DESERT_DIARY_EASY_COMPLETE, VarbitID.DESERT_DIARY_MEDIUM_COMPLETE,
+			VarbitID.DESERT_DIARY_HARD_COMPLETE, VarbitID.DESERT_DIARY_ELITE_COMPLETE},
+		{VarbitID.FALADOR_DIARY_EASY_COMPLETE, VarbitID.FALADOR_DIARY_MEDIUM_COMPLETE,
+			VarbitID.FALADOR_DIARY_HARD_COMPLETE, VarbitID.FALADOR_DIARY_ELITE_COMPLETE},
+		{VarbitID.FREMENNIK_DIARY_EASY_COMPLETE, VarbitID.FREMENNIK_DIARY_MEDIUM_COMPLETE,
+			VarbitID.FREMENNIK_DIARY_HARD_COMPLETE, VarbitID.FREMENNIK_DIARY_ELITE_COMPLETE},
+		{VarbitID.KANDARIN_DIARY_EASY_COMPLETE, VarbitID.KANDARIN_DIARY_MEDIUM_COMPLETE,
+			VarbitID.KANDARIN_DIARY_HARD_COMPLETE, VarbitID.KANDARIN_DIARY_ELITE_COMPLETE},
+		{VarbitID.ATJUN_EASY_DONE, VarbitID.ATJUN_MED_DONE, VarbitID.ATJUN_HARD_DONE,
+			VarbitID.KARAMJA_DIARY_ELITE_COMPLETE},
+		{VarbitID.KOUREND_DIARY_EASY_COMPLETE, VarbitID.KOUREND_DIARY_MEDIUM_COMPLETE,
+			VarbitID.KOUREND_DIARY_HARD_COMPLETE, VarbitID.KOUREND_DIARY_ELITE_COMPLETE},
+		{VarbitID.LUMBRIDGE_DIARY_EASY_COMPLETE, VarbitID.LUMBRIDGE_DIARY_MEDIUM_COMPLETE,
+			VarbitID.LUMBRIDGE_DIARY_HARD_COMPLETE, VarbitID.LUMBRIDGE_DIARY_ELITE_COMPLETE},
+		{VarbitID.MORYTANIA_DIARY_EASY_COMPLETE, VarbitID.MORYTANIA_DIARY_MEDIUM_COMPLETE,
+			VarbitID.MORYTANIA_DIARY_HARD_COMPLETE, VarbitID.MORYTANIA_DIARY_ELITE_COMPLETE},
+		{VarbitID.VARROCK_DIARY_EASY_COMPLETE, VarbitID.VARROCK_DIARY_MEDIUM_COMPLETE,
+			VarbitID.VARROCK_DIARY_HARD_COMPLETE, VarbitID.VARROCK_DIARY_ELITE_COMPLETE},
+		{VarbitID.WESTERN_DIARY_EASY_COMPLETE, VarbitID.WESTERN_DIARY_MEDIUM_COMPLETE,
+			VarbitID.WESTERN_DIARY_HARD_COMPLETE, VarbitID.WESTERN_DIARY_ELITE_COMPLETE},
+		{VarbitID.WILDERNESS_DIARY_EASY_COMPLETE, VarbitID.WILDERNESS_DIARY_MEDIUM_COMPLETE,
+			VarbitID.WILDERNESS_DIARY_HARD_COMPLETE, VarbitID.WILDERNESS_DIARY_ELITE_COMPLETE},
+	};
+
+	// Karamja's easy, medium and hard variables read 1 while a tier is only started and 2 once it is
+	// complete. Every other diary variable reads 1 for complete.
+	private static final int KARAMJA_REGION_INDEX = 5;
+	private static final int KARAMJA_STAGED_TIERS = 3;
+	private static final int KARAMJA_TIER_DONE = 2;
+
+	// RuneLite documents 2 as "completed" for these, and documents no other value.
+	static final int[] COMBAT_ACHIEVEMENT_TIER_VARBITS = {
+		VarbitID.CA_TIER_STATUS_EASY, VarbitID.CA_TIER_STATUS_MEDIUM, VarbitID.CA_TIER_STATUS_HARD,
+		VarbitID.CA_TIER_STATUS_ELITE, VarbitID.CA_TIER_STATUS_MASTER,
+		VarbitID.CA_TIER_STATUS_GRANDMASTER,
+	};
+	private static final int COMBAT_ACHIEVEMENT_TIER_COMPLETED = 2;
+
+	// The constructor tests use when a run should write no schema-5 file at all.
+	private static final Supplier<SnapshotStore> NO_MANAGED_DIRECTORY = () -> null;
+
+	// Whether this build reads and writes the schema-5 account document. Off: the plugin reads no
+	// bank, Seed Vault, quest, diary or Combat Achievement value and writes no account-v5.json.
+	private static final boolean ACCOUNT_DOCUMENT = false;
+
 	@Inject
 	Client client;
 
@@ -146,6 +226,14 @@ public class FacetteTelemetryPlugin extends Plugin
 
 	private final Supplier<ScheduledExecutorService> executors;
 
+	// Schema 5's directory. Null means the plugin's own managed directory, resolved per run.
+	private final Supplier<SnapshotStore> managedStores;
+
+	// Whether the account document is read and written. ACCOUNT_DOCUMENT outside tests.
+	private final boolean accountDocument;
+
+	private final Supplier<String> characterSessionIds;
+
 	// Serializes the commit step across runs: the authority check and the target replacement only.
 	// Staging stays outside it, so a stalled write delays nobody.
 	private final ReentrantLock publishLock = new ReentrantLock();
@@ -162,18 +250,43 @@ public class FacetteTelemetryPlugin extends Plugin
 			System::nanoTime,
 			() -> UUID.randomUUID().toString(),
 			FacetteTelemetryPlugin::runeLiteDataDirectory,
-			FacetteTelemetryPlugin::newPublisherExecutor);
+			FacetteTelemetryPlugin::newPublisherExecutor,
+			null,
+			() -> UUID.randomUUID().toString());
+	}
+
+	/** Writes schemas 3 and 4 only, as every build before schema 5 did. */
+	FacetteTelemetryPlugin(LongSupplier wallClockMillis, LongSupplier elapsedNanos,
+		Supplier<String> instanceIds, Supplier<Path> dataDirectories,
+		Supplier<ScheduledExecutorService> executors)
+	{
+		this(wallClockMillis, elapsedNanos, instanceIds, dataDirectories, executors,
+			NO_MANAGED_DIRECTORY, () -> UUID.randomUUID().toString());
+	}
+
+	/** Schema 5 with the account document as this build ships it: switched off. */
+	FacetteTelemetryPlugin(LongSupplier wallClockMillis, LongSupplier elapsedNanos,
+		Supplier<String> instanceIds, Supplier<Path> dataDirectories,
+		Supplier<ScheduledExecutorService> executors, Supplier<SnapshotStore> managedStores,
+		Supplier<String> characterSessionIds)
+	{
+		this(wallClockMillis, elapsedNanos, instanceIds, dataDirectories, executors, managedStores,
+			characterSessionIds, ACCOUNT_DOCUMENT);
 	}
 
 	FacetteTelemetryPlugin(LongSupplier wallClockMillis, LongSupplier elapsedNanos,
 		Supplier<String> instanceIds, Supplier<Path> dataDirectories,
-		Supplier<ScheduledExecutorService> executors)
+		Supplier<ScheduledExecutorService> executors, Supplier<SnapshotStore> managedStores,
+		Supplier<String> characterSessionIds, boolean accountDocument)
 	{
 		this.wallClockMillis = Objects.requireNonNull(wallClockMillis, "wallClockMillis");
 		this.elapsedNanos = Objects.requireNonNull(elapsedNanos, "elapsedNanos");
 		this.instanceIds = Objects.requireNonNull(instanceIds, "instanceIds");
 		this.dataDirectories = Objects.requireNonNull(dataDirectories, "dataDirectories");
 		this.executors = Objects.requireNonNull(executors, "executors");
+		this.managedStores = managedStores;
+		this.characterSessionIds = Objects.requireNonNull(characterSessionIds, "characterSessionIds");
+		this.accountDocument = accountDocument;
 	}
 
 	@Override
@@ -182,11 +295,17 @@ public class FacetteTelemetryPlugin extends Plugin
 		// A fresh identity every start, derived from nothing: not the account, profile, machine, or
 		// any game state. It only lets a reader notice a restart.
 		Path dataDirectory = dataDirectories.get();
+		ManagedExport managedExport = managedStores == NO_MANAGED_DIRECTORY
+			? null
+			: new ManagedExport(managedStores != null ? managedStores : this::openManagedDirectory,
+				wallClockMillis, accountDocument);
 		PublisherRunContext run = PublisherRunContext.begin(
 			newestGeneration,
-			new TelemetryState(instanceIds.get(), wallClockMillis, elapsedNanos),
+			new TelemetryState(instanceIds.get(), wallClockMillis, elapsedNanos,
+				managedExport != null, QUEST_CATALOGUE.length, characterSessionIds),
 			new TelemetrySnapshotWriter(dataDirectory, TelemetrySnapshot.SCHEMA),
-			new TelemetrySnapshotWriter(dataDirectory, TelemetrySnapshot.SCHEMA_4));
+			new TelemetrySnapshotWriter(dataDirectory, TelemetrySnapshot.SCHEMA_4),
+			managedExport);
 		currentRun = run;
 
 		clientThread.invoke(() -> initializeOnClientThread(run));
@@ -276,7 +395,7 @@ public class FacetteTelemetryPlugin extends Plugin
 		// The final write reports the plugin as inactive and carries no gameplay data. It is queued on
 		// the run's own publisher thread and completes there, unwaited for: this thread may be the
 		// client thread, and disabling a plugin must not wait on a filesystem operation.
-		if (run.submitFinalWrite(() -> publish(run, false)))
+		if (run.submitFinalWrite(() -> publishFinal(run)))
 		{
 			// It commits only if it still holds authority when it gets there, so a re-enable that
 			// beats it to the file leaves it nothing to do.
@@ -329,7 +448,223 @@ public class FacetteTelemetryPlugin extends Plugin
 		if (run != null && run.isInitialized())
 		{
 			sampleClientState(run.getState());
+			if (accountDocument)
+			{
+				readAccountProgress(run.getState());
+			}
 		}
+	}
+
+	/**
+	 * A different RuneScape profile is a different character, even without a logout: a move between
+	 * a standard and a seasonal world, for example. The first profile of a login is not a change.
+	 */
+	@Subscribe
+	public void onRuneScapeProfileChanged(RuneScapeProfileChanged event)
+	{
+		PublisherRunContext run = liveRun();
+		if (run == null || !run.isInitialized() || event.getPreviousProfile() == null)
+		{
+			return;
+		}
+		run.getState().endCharacterSession();
+	}
+
+	/**
+	 * Records the bank or the Seed Vault when the game delivers it, which it does when the player
+	 * opens one and while its contents change. Nothing here asks for either.
+	 */
+	@Subscribe
+	public void onItemContainerChanged(ItemContainerChanged event)
+	{
+		if (!accountDocument)
+		{
+			return;
+		}
+		int containerId = event.getContainerId();
+		if (containerId != InventoryID.BANK && containerId != InventoryID.SEED_VAULT)
+		{
+			return;
+		}
+		PublisherRunContext run = liveRun();
+		if (run == null || !run.isInitialized() || !run.getState().isSchema5Enabled())
+		{
+			return;
+		}
+		TelemetryState state = run.getState();
+		String session = state.getCharacterSessionId();
+		if (session == null || client.getGameState() != GameState.LOGGED_IN)
+		{
+			return;
+		}
+		boolean bank = containerId == InventoryID.BANK;
+		List<TelemetryAccountState.StoredItem> items = readStoredItems(event.getItemContainer(),
+			bank ? TelemetryAccountState.MAX_BANK_ITEMS : TelemetryAccountState.MAX_SEED_VAULT_ITEMS);
+		long at = wallClockMillis.getAsLong();
+		if (bank)
+		{
+			state.getAccount().observeBank(session, items, at);
+		}
+		else
+		{
+			state.getAccount().observeSeedVault(session, items, at);
+		}
+	}
+
+	/**
+	 * A delivered container's items in container order, empty positions dropped, or null when it is
+	 * missing or holds more than the bound. Every position is classified from the item itself: the
+	 * bank filler by its identifier, a placeholder by its own composition.
+	 */
+	private List<TelemetryAccountState.StoredItem> readStoredItems(ItemContainer container, int max)
+	{
+		if (container == null)
+		{
+			return null;
+		}
+		Item[] items = container.getItems();
+		List<TelemetryAccountState.StoredItem> stored = new ArrayList<>();
+		for (Item item : items)
+		{
+			if (item == null || item.getId() < 0)
+			{
+				continue;
+			}
+			if (stored.size() >= max)
+			{
+				return null;
+			}
+			int id = item.getId();
+			String kind;
+			if (id == ItemID.BANK_FILLER)
+			{
+				kind = TelemetryAccountState.KIND_FILLER;
+			}
+			else if (isPlaceholder(id))
+			{
+				kind = TelemetryAccountState.KIND_PLACEHOLDER;
+			}
+			else
+			{
+				kind = TelemetryAccountState.KIND_ITEM;
+			}
+			stored.add(new TelemetryAccountState.StoredItem(id, Math.max(0, item.getQuantity()), kind));
+		}
+		return stored;
+	}
+
+	private boolean isPlaceholder(int itemId)
+	{
+		ItemComposition composition = client.getItemDefinition(itemId);
+		return composition != null && composition.getPlaceholderTemplateId() != -1;
+	}
+
+	/**
+	 * Reads quests, diaries and Combat Achievement tiers for schema 5, a bounded amount per tick:
+	 * from the second sampled tick of a character session, and only while the skill totals are
+	 * current, which is the sign that the login variable sync has arrived.
+	 */
+	private void readAccountProgress(TelemetryState state)
+	{
+		if (!state.isSchema5Enabled())
+		{
+			return;
+		}
+		String session = state.getCharacterSessionId();
+		if (session == null)
+		{
+			return;
+		}
+		long tick = state.countSessionTick();
+		if (tick < PROGRESS_FIRST_TICK || !state.isSkillsCurrent())
+		{
+			return;
+		}
+		TelemetryAccountState account = state.getAccount();
+		long at = wallClockMillis.getAsLong();
+		readQuestBatch(account, session, at);
+		if ((tick - PROGRESS_FIRST_TICK) % PROGRESS_REFRESH_TICKS == 0)
+		{
+			account.observeDiaries(session, readDiaryTiers(), at);
+			account.observeCombatAchievements(session, readCombatAchievementTiers(), at);
+		}
+	}
+
+	private void readQuestBatch(TelemetryAccountState account, String session, long at)
+	{
+		int size = QUEST_CATALOGUE.length;
+		int start = account.claimQuestBatch(QUESTS_PER_TICK);
+		if (start < 0)
+		{
+			return;
+		}
+		for (int i = 0; i < Math.min(QUESTS_PER_TICK, size); i++)
+		{
+			int index = (start + i) % size;
+			Quest quest = QUEST_CATALOGUE[index];
+			account.observeQuest(session, index,
+				new TelemetryAccountState.QuestEntry(quest.getId(), quest.getName(), readQuestState(quest)),
+				at);
+		}
+	}
+
+	// A read that fails is "unavailable", never "not started".
+	private String readQuestState(Quest quest)
+	{
+		QuestState state;
+		try
+		{
+			state = quest.getState(client);
+		}
+		catch (RuntimeException e)
+		{
+			return TelemetryAccountState.QUEST_UNAVAILABLE;
+		}
+		if (state == null)
+		{
+			return TelemetryAccountState.QUEST_UNAVAILABLE;
+		}
+		switch (state)
+		{
+			case FINISHED:
+				return TelemetryAccountState.QUEST_FINISHED;
+			case IN_PROGRESS:
+				return TelemetryAccountState.QUEST_IN_PROGRESS;
+			case NOT_STARTED:
+				return TelemetryAccountState.QUEST_NOT_STARTED;
+			default:
+				return TelemetryAccountState.QUEST_UNAVAILABLE;
+		}
+	}
+
+	private boolean[][] readDiaryTiers()
+	{
+		boolean[][] complete = new boolean[DIARY_TIER_VARBITS.length][];
+		for (int region = 0; region < DIARY_TIER_VARBITS.length; region++)
+		{
+			int[] varbits = DIARY_TIER_VARBITS[region];
+			complete[region] = new boolean[varbits.length];
+			for (int tier = 0; tier < varbits.length; tier++)
+			{
+				int value = client.getVarbitValue(varbits[tier]);
+				complete[region][tier] =
+					region == KARAMJA_REGION_INDEX && tier < KARAMJA_STAGED_TIERS
+						? value == KARAMJA_TIER_DONE
+						: value == 1;
+			}
+		}
+		return complete;
+	}
+
+	private boolean[] readCombatAchievementTiers()
+	{
+		boolean[] completed = new boolean[COMBAT_ACHIEVEMENT_TIER_VARBITS.length];
+		for (int tier = 0; tier < COMBAT_ACHIEVEMENT_TIER_VARBITS.length; tier++)
+		{
+			completed[tier] = client.getVarbitValue(COMBAT_ACHIEVEMENT_TIER_VARBITS[tier])
+				== COMBAT_ACHIEVEMENT_TIER_COMPLETED;
+		}
+		return completed;
 	}
 
 	/**
@@ -364,11 +699,29 @@ public class FacetteTelemetryPlugin extends Plugin
 		GameState gameState = client.getGameState();
 		boolean loggedIn = gameState == GameState.LOGGED_IN;
 		state.updateSession(gameState.name(), loggedIn);
-		if (!loggedIn)
+		state.beginSample();
+		boolean completed = false;
+		try
 		{
-			return;
+			if (loggedIn)
+			{
+				sampleLoggedInState(state);
+				completed = true;
+			}
 		}
+		finally
+		{
+			state.endSample(completed);
+		}
+	}
 
+	/**
+	 * One logged-in sample. Every group is read whether or not another is missing: a container the
+	 * client has not provided leaves that group unread and nothing else, so a character wearing
+	 * nothing is recognized on its first sample.
+	 */
+	private void sampleLoggedInState(TelemetryState state)
+	{
 		// The first live sample of a session establishes its baselines. Reading on a tick rather
 		// than on the logged-in transition narrows the window in which the client's totals are
 		// still zero, and the state refuses a zero baseline for the case where it has not closed.
@@ -758,6 +1111,8 @@ public class FacetteTelemetryPlugin extends Plugin
 		}
 		try
 		{
+			// The account document first, so the snapshot that follows can reference it.
+			publishAccountIfDue(run);
 			if (run.getState().isPublicationDue(HEARTBEAT_INTERVAL_MILLIS))
 			{
 				publish(run, true);
@@ -768,6 +1123,60 @@ public class FacetteTelemetryPlugin extends Plugin
 			// Logged without any part of the snapshot payload.
 			log.warn("Telemetry publication tick failed; publication continues", e);
 		}
+	}
+
+	/**
+	 * The schema-5 account document, when one is due. Committed before the state file that will
+	 * reference it, so a reader never finds a reference to a revision that is not on disk yet.
+	 */
+	private void publishAccountIfDue(PublisherRunContext run)
+	{
+		ManagedExport export = run.getManagedExport();
+		if (export == null || !export.isAvailable() || export.getAccountWriter() == null)
+		{
+			return;
+		}
+		TelemetryState state = run.getState();
+		TelemetryAccountState.Document document =
+			state.getAccount().prepareDocument(ACCOUNT_WRITE_INTERVAL_MILLIS);
+		if (document == null)
+		{
+			return;
+		}
+		try
+		{
+			int bytes = export.getAccountWriter().write(
+				document.getBytes(), publishLock, run::isCommitAuthorized);
+			state.getAccount().markCommitted(document);
+			state.recordAccountCommitted(document.getCharacterSessionId(), document.getRevision());
+			log.debug("Published account document revision={} ({} bytes)",
+				document.getRevision(), bytes);
+		}
+		catch (TelemetrySnapshotWriter.CommitNotAuthorizedException e)
+		{
+			log.debug("Abandoned an account document superseded by a newer plugin run");
+		}
+		catch (IOException e)
+		{
+			// Logged without the payload. The revision was not consumed, so this is retried.
+			log.warn("Unable to publish the account document to {}",
+				export.getAccountWriter().describeTarget(), e);
+		}
+	}
+
+	/**
+	 * The final write as the plugin stops: the account document, when this build writes one, is
+	 * cleared first, so a stopped plugin leaves no character's bank behind looking current, then the
+	 * inactive snapshot.
+	 */
+	private void publishFinal(PublisherRunContext run)
+	{
+		if (run.getManagedExport() != null && accountDocument)
+		{
+			run.getState().getAccount().endSession();
+			publishAccountIfDue(run);
+		}
+		publish(run, false);
 	}
 
 	private void publish(PublisherRunContext run, boolean pluginActive)
@@ -800,6 +1209,39 @@ public class FacetteTelemetryPlugin extends Plugin
 		// reuses for different content. A schema-4 failure changes nothing about schema 3: its
 		// number is spent, and the next publication rewrites schema 4 under a higher one.
 		publishSchema4(run, snapshot);
+		publishSchema5(run, snapshot);
+	}
+
+	/**
+	 * Schema 5, last and in the managed directory, under the same number. Like schema 4 it never
+	 * affects the legacy files: a failure here leaves them as they are and is retried by the next
+	 * publication.
+	 */
+	private void publishSchema5(PublisherRunContext run, TelemetrySnapshot snapshot)
+	{
+		TelemetrySnapshot view = snapshot.getSchema5View();
+		ManagedExport export = run.getManagedExport();
+		if (view == null || export == null || !export.isAvailable())
+		{
+			return;
+		}
+		try
+		{
+			int bytes = export.getStateWriter().write(
+				view.toJsonBytes(TelemetrySnapshot.SCHEMA_5), publishLock, run::isCommitAuthorized);
+			log.debug("Published schema-5 telemetry snapshot seq={} ({} bytes)",
+				view.getSeq(), bytes);
+			export.logReadiness(view.getReadinessState(), view.getReadinessMissing());
+		}
+		catch (TelemetrySnapshotWriter.CommitNotAuthorizedException e)
+		{
+			log.debug("Abandoned a telemetry snapshot superseded by a newer plugin run");
+		}
+		catch (IOException e)
+		{
+			log.warn("Unable to publish telemetry snapshot to {}",
+				export.getStateWriter().describeTarget(), e);
+		}
 	}
 
 	private void publishSchema4(PublisherRunContext run, TelemetrySnapshot snapshot)
@@ -825,6 +1267,23 @@ public class FacetteTelemetryPlugin extends Plugin
 			// Logged without the payload. Schema 3 already holds this number, so the file is left
 			// for the next publication, a change or the heartbeat, to rewrite under a higher one.
 			log.warn("Unable to publish telemetry snapshot to {}", schema4Writer.getTarget(), e);
+		}
+	}
+
+	/**
+	 * The plugin's own managed directory, from RuneLite. Called on the publisher thread on the run's
+	 * first publication. Null when RuneLite cannot provide it, which leaves schema 5 unwritten.
+	 */
+	private SnapshotStore openManagedDirectory()
+	{
+		try
+		{
+			return new FilepathSnapshotStore(getPluginDirectory());
+		}
+		catch (IOException | RuntimeException e)
+		{
+			log.warn("Facette Telemetry cannot open its managed directory; schema 5 is not written", e);
+			return null;
 		}
 	}
 
