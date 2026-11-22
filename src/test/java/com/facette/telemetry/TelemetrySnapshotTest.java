@@ -52,9 +52,9 @@ import org.junit.Test;
  */
 public class TelemetrySnapshotTest
 {
-	private static final String INSTANCE_ID = "0f8b1d3a-6c2e-4a15-9f77-2b8d4e6a1c90";
+	static final String INSTANCE_ID = "0f8b1d3a-6c2e-4a15-9f77-2b8d4e6a1c90";
 
-	private static final long EMITTED_AT = 1_770_000_000_000L;
+	static final long EMITTED_AT = 1_770_000_000_000L;
 
 	/**
 	 * Schema 2's eleven keys in their original order, then schema 3's six appended after them. The
@@ -177,7 +177,7 @@ public class TelemetrySnapshotTest
 			.build();
 	}
 
-	private static TelemetrySnapshot.Builder populatedFixtureBuilder()
+	static TelemetrySnapshot.Builder populatedFixtureBuilder()
 	{
 		return TelemetrySnapshot.builder()
 			.envelope(INSTANCE_ID, 7L, EMITTED_AT)
@@ -234,7 +234,7 @@ public class TelemetrySnapshotTest
 	 * live enumeration is a separate lifecycle test, which drives the real reader and checks it
 	 * exports every skill the enumeration defines, in its order.
 	 */
-	private static List<TelemetrySkillState> fixtureSkillStates()
+	static List<TelemetrySkillState> fixtureSkillStates()
 	{
 		List<TelemetrySkillState> skills = new ArrayList<>();
 		skills.add(new TelemetrySkillState("attack", 70, 74, 737_627));
@@ -269,7 +269,7 @@ public class TelemetrySnapshotTest
 	 * progress, a completed sale, a cancelled offer, and the empty shape, so a reader sees both the
 	 * populated entry and the state-only one.
 	 */
-	private static List<TelemetryGrandExchangeSlot> fixtureGrandExchangeSlots()
+	static List<TelemetryGrandExchangeSlot> fixtureGrandExchangeSlots()
 	{
 		List<TelemetryGrandExchangeSlot> slots = new ArrayList<>();
 		slots.add(TelemetryGrandExchangeSlot.offer("buying", 3001, 170, 1_000, 250, 42_500));
@@ -839,13 +839,14 @@ public class TelemetrySnapshotTest
 	}
 
 	@Test
-	public void onlySchemasThreeAndFourCanBeSerialized()
+	public void onlyTheDocumentedSchemasCanBeSerialized()
 	{
 		assertEquals(4, TelemetrySnapshot.SCHEMA_4);
 		assertEquals(98, TelemetrySnapshot.SLAYER_BOSS_TASK_ID);
 		assertTrue(populatedFixture().toJson(TelemetrySnapshot.SCHEMA_4).startsWith(
 			"{\"schema\":4,\"source\":\"runelite\","));
-		for (int schema : new int[]{1, 2, 5})
+		// Schema 5 is serialized only from its own view, which TelemetrySchema5Test pins.
+		for (int schema : new int[]{1, 2, 6})
 		{
 			try
 			{
@@ -1091,12 +1092,10 @@ public class TelemetrySnapshotTest
 	}
 
 	/**
-	 * The measured worst case, which is what makes the existing 16,384-byte ceiling a
-	 * demonstrated bound rather than an assumption: every collection at its maximum size, every
-	 * bounded string at its maximum length, and every number at its widest.
+	 * Every collection at its maximum size, every bounded string at its maximum length, and every
+	 * number at its widest. Shared with the schema-5 worst case, so both measure the same document.
 	 */
-	@Test
-	public void theLargestReachableDocumentFitsInsideTheExistingCeiling()
+	static TelemetrySnapshot.Builder widestBuilder()
 	{
 		List<TelemetryItemSlot> maxEquipment = new ArrayList<>();
 		for (int i = 0; i < TelemetrySnapshot.EQUIPMENT_SLOTS.size(); i++)
@@ -1146,7 +1145,7 @@ public class TelemetrySnapshotTest
 				Long.MAX_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE, Long.MAX_VALUE));
 		}
 
-		TelemetrySnapshot.Builder widest = TelemetrySnapshot.builder()
+		return TelemetrySnapshot.builder()
 			.envelope(repeat('I', TelemetrySnapshot.MAX_INSTANCE_ID_CHARS), Long.MAX_VALUE,
 				9_999_999_999_999L)
 			.session(true, repeat('G', TelemetrySnapshot.MAX_GAME_STATE_CHARS), true,
@@ -1166,6 +1165,17 @@ public class TelemetrySnapshotTest
 			.quests(Integer.MAX_VALUE)
 			.slayer(Integer.MAX_VALUE, Integer.MAX_VALUE)
 			.grandExchange(maxOffers);
+	}
+
+	/**
+	 * The measured worst case, which is what makes the existing 16,384-byte ceiling a
+	 * demonstrated bound rather than an assumption: every collection at its maximum size, every
+	 * bounded string at its maximum length, and every number at its widest.
+	 */
+	@Test
+	public void theLargestReachableDocumentFitsInsideTheExistingCeiling()
+	{
+		TelemetrySnapshot.Builder widest = widestBuilder();
 		TelemetrySnapshot largest = widest.build();
 
 		int size = largest.toJsonBytes().length;
@@ -1566,7 +1576,7 @@ public class TelemetrySnapshotTest
 			.build();
 	}
 
-	private static String repeat(char c, int times)
+	static String repeat(char c, int times)
 	{
 		StringBuilder sb = new StringBuilder(times);
 		for (int i = 0; i < times; i++)

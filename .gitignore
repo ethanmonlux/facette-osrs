@@ -13,3 +13,4 @@ nbproject/
 # is part of the official RuneLite template and is intentionally tracked.
 *.jar
 !gradle/wrapper/gradle-wrapper.jar
+__pycache__/

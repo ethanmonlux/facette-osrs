@@ -30,9 +30,11 @@ and it behaves the same whether Facette is installed, running, or absent.
 
 ## What it does and does not do
 
-**Read-only.** The plugin reads supported RuneLite client state and writes one local snapshot,
-as two schema-versioned files side by side. It performs no clicks, no keystrokes, no menu actions, no automation, and no window
-manipulation, and it accepts no commands from Facette or from the file it writes.
+**Read-only.** The plugin reads supported RuneLite client state and writes one local snapshot as
+schema-versioned files: schemas 3 and 4 side by side in `.runelite/facette`, and schema 5 in the
+plugin's own RuneLite-managed directory. It performs no clicks, no keystrokes, no menu actions, no
+automation, and no window manipulation, never opens an interface, and accepts no commands from
+Facette or from the files it writes.
 
 **No network communication.** Your game state does not leave your computer because of this
 plugin. The plugin contains no network client or server code and makes no network requests.
@@ -60,18 +62,33 @@ boss task, and which area, when the task was assigned to one. They are identifie
 names. Schema 4 is written to its own file beside schema 3's, so a reader of schema 3 keeps reading
 exactly the document it read before.
 
-### Not exported under schema 3
+### Exported under schema 5
 
-Account name or hash, credentials, chat, friends, clan data, other players, any player target,
-bank contents, Seed Vault, collection log, quest-by-quest progress, item prices or valuations,
-aggregate wealth, Grand Exchange trade history, and location.
+Everything schema 4 exports, written so that a logged-in character is recognized even before the
+client has provided its worn-items or backpack container: each group says whether it is current, a
+retained earlier reading, not yet observed, or unavailable, together with when it was observed.
+A random character-session identifier, made fresh at each login and never derived from your
+account, ties the readings together. It is discarded when you log out, change to a different
+RuneScape profile, or disable the plugin.
 
-The schema 3 and schema 4 field lists are closed and documented in **[SCHEMA.md](SCHEMA.md)**,
+### Not exported
+
+Account name or hash, RuneLite profile keys, credentials, chat, friends, clan data, other players,
+any player target, your bank, your Seed Vault or any other storage, per-quest state, Achievement
+Diary and Combat Achievement progress, collection log, item prices or valuations, aggregate wealth,
+Grand Exchange trade history, and location. The plugin does not read your bank, Seed Vault,
+per-quest state, Achievement Diary or Combat Achievement data at all; of your quests it reads only
+the quest point total listed above.
+
+The schema 3, 4 and 5 field lists are closed and documented in **[SCHEMA.md](SCHEMA.md)**,
 with committed byte-exact examples: for schema 3,
 [a populated snapshot](src/test/resources/facette-osrs-state-v3.json) and
 [a logged-out snapshot](src/test/resources/facette-osrs-state-v3-logged-out.json); for schema 4,
 [a populated snapshot](src/test/resources/facette-osrs-state-v4.json) and
-[a logged-out snapshot](src/test/resources/facette-osrs-state-v4-logged-out.json).
+[a logged-out snapshot](src/test/resources/facette-osrs-state-v4-logged-out.json); for schema 5,
+[a ready snapshot](src/test/resources/facette-osrs-state-v5.json),
+[a snapshot of a character whose worn items the client has not provided](src/test/resources/facette-osrs-state-v5-partial.json)
+and [a logged-out snapshot](src/test/resources/facette-osrs-state-v5-logged-out.json).
 
 ## Where the files are written
 
@@ -82,12 +99,18 @@ On Windows:
 %USERPROFILE%\.runelite\facette\state-v4.json
 ```
 
-On other platforms it is the same location relative to RuneLite's own data directory,
-`~/.runelite/facette/state-v3.json` and `~/.runelite/facette/state-v4.json`.
+and, through RuneLite's managed file API,
 
-Those are the only two paths the plugin writes to. It creates the `facette` directory if it is missing,
-writes nothing inside your Old School RuneScape installation, does not scan your filesystem, and
-has no configurable output path.
+```text
+%USERPROFILE%\.runelite\plugin-data\facette-companion\state-v5.json
+```
+
+On other platforms they are the same locations relative to RuneLite's own data directory, under
+`~/.runelite/facette/` and `~/.runelite/plugin-data/facette-companion/`.
+
+Those are the only three paths the plugin writes to. It creates the two directories if they are
+missing, does not move or migrate either, writes nothing inside your Old School RuneScape
+installation, does not scan your filesystem, and has no configurable output path.
 
 Values are resampled each game tick and republished when they change, at most four times per
 second, plus a heartbeat at least every two seconds so a reader can tell a live plugin from a
@@ -108,13 +131,14 @@ cases the file simply stops being updated, so treat it as stale once `emittedAt`
 rather than waiting for an inactive snapshot that may never arrive. What the plugin never does is
 report an orderly shutdown that did not happen.
 
-To remove the exported data, delete the directory:
+To remove the exported data, delete the two directories:
 
 ```text
 %USERPROFILE%\.runelite\facette
+%USERPROFILE%\.runelite\plugin-data\facette-companion
 ```
 
-Deleting it removes the exported file and nothing else. The plugin keeps no history, database, log
+Deleting them removes the exported files and nothing else. The plugin keeps no history, database, log
 of your play, or copy of the data anywhere else. If the plugin is still enabled, it recreates the
 directory and the file on its next publication.
 
