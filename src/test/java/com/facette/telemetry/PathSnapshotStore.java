@@ -46,8 +46,14 @@ final class PathSnapshotStore implements SnapshotStore
 	/** Every replacement made, as "temp name -> target name", in order. */
 	final List<String> replacements = new ArrayList<>();
 
+	/** The options of every replacement attempted, in order, including refused or failed ones. */
+	final List<List<CopyOption>> replaceOptions = new ArrayList<>();
+
 	/** When set, the next atomic replacement fails as unsupported, once. */
 	boolean refuseNextAtomicMove;
+
+	/** When set, the next replacement fails with this, once. */
+	IOException failNextReplace;
 
 	PathSnapshotStore(Path directory)
 	{
@@ -87,6 +93,13 @@ final class PathSnapshotStore implements SnapshotStore
 			@Override
 			public void replace(String targetName, CopyOption... options) throws IOException
 			{
+				replaceOptions.add(java.util.Arrays.asList(options));
+				if (failNextReplace != null)
+				{
+					IOException failure = failNextReplace;
+					failNextReplace = null;
+					throw failure;
+				}
 				for (CopyOption option : options)
 				{
 					if (option == java.nio.file.StandardCopyOption.ATOMIC_MOVE && refuseNextAtomicMove)

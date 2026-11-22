@@ -51,7 +51,8 @@ final class PublisherRunContext
 	// schema 3.
 	private final TelemetrySnapshotWriter schema4Writer;
 
-	// Schema 5's managed-directory output, or null when this run writes none.
+	// The run's managed directory and its schema-5 files. Null only in tests that drive a writer
+	// directly.
 	private final ManagedExport managedExport;
 
 	// False once this run has been retired. Never returns to true.
@@ -118,7 +119,7 @@ final class PublisherRunContext
 	}
 
 	// What protects the target file is commit authority, not this.
-	/** Schema 5's output, or null when this run writes only the legacy files. */
+	/** The run's managed directory and schema-5 files, or null in tests that drive a writer directly. */
 	ManagedExport getManagedExport()
 	{
 		return managedExport;

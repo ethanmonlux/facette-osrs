@@ -31,8 +31,8 @@ and it behaves the same whether Facette is installed, running, or absent.
 ## What it does and does not do
 
 **Read-only.** The plugin reads supported RuneLite client state and writes one local snapshot as
-schema-versioned files: schemas 3 and 4 side by side in `.runelite/facette`, and schema 5 in the
-plugin's own RuneLite-managed directory. It performs no clicks, no keystrokes, no menu actions, no
+schema-versioned files, all in the plugin's own RuneLite-managed directory, written through
+RuneLite's managed file API. It performs no clicks, no keystrokes, no menu actions, no
 automation, and no window manipulation, never opens an interface, and accepts no commands from
 Facette or from the files it writes. Per-quest state is read through RuneLite's own `Quest`
 API, which runs the game's read-only quest-status script; those reads are limited to a small batch
@@ -112,26 +112,26 @@ with committed byte-exact examples: for schema 3,
 
 ## Where the files are written
 
-On Windows:
+On Windows, through RuneLite's managed file API:
 
 ```text
-%USERPROFILE%\.runelite\facette\state-v3.json
-%USERPROFILE%\.runelite\facette\state-v4.json
-```
-
-and, through RuneLite's managed file API,
-
-```text
+%USERPROFILE%\.runelite\plugin-data\facette-companion\state-v3.json
+%USERPROFILE%\.runelite\plugin-data\facette-companion\state-v4.json
 %USERPROFILE%\.runelite\plugin-data\facette-companion\state-v5.json
 %USERPROFILE%\.runelite\plugin-data\facette-companion\account-v5.json
 ```
 
-On other platforms they are the same locations relative to RuneLite's own data directory, under
-`~/.runelite/facette/` and `~/.runelite/plugin-data/facette-companion/`.
+On other platforms it is the same location relative to RuneLite's own data directory,
+`~/.runelite/plugin-data/facette-companion/`.
 
-Those are the only four paths the plugin writes to. It creates the two directories if they are
-missing, does not move or migrate either, writes nothing inside your Old School RuneScape
-installation, does not scan your filesystem, and has no configurable output path.
+Those are the only four paths the plugin writes to. It has RuneLite create the directory if it is
+missing, writes nothing inside your Old School RuneScape installation, does not scan your
+filesystem, and has no configurable output path.
+
+Earlier versions wrote `state-v3.json` and `state-v4.json` to `.runelite/facette`. If that
+directory exists and the plugin's own directory does not yet, RuneLite moves the old directory
+into place when the plugin first writes. Otherwise the old directory is left as it was and no
+longer updated; you can delete it.
 
 Values are resampled each game tick and republished when they change, at most four times per
 second, plus a heartbeat at least every two seconds so a reader can tell a live plugin from a
@@ -152,16 +152,16 @@ cases the file simply stops being updated, so treat it as stale once `emittedAt`
 rather than waiting for an inactive snapshot that may never arrive. What the plugin never does is
 report an orderly shutdown that did not happen.
 
-To remove the exported data, delete the two directories:
+To remove the exported data, delete the plugin's directory (and, if an earlier version left one,
+`%USERPROFILE%\.runelite\facette`):
 
 ```text
-%USERPROFILE%\.runelite\facette
 %USERPROFILE%\.runelite\plugin-data\facette-companion
 ```
 
-Deleting them removes the exported files, including the account document, and nothing else. The plugin keeps no history, database, log
+Deleting it removes the exported files, including the account document, and nothing else. The plugin keeps no history, database, log
 of your play, or copy of the data anywhere else. If the plugin is still enabled, it recreates the
-directories and the files on its next publication.
+directory and the files on its next publication.
 
 ## Contributor workflow
 

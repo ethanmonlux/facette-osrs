@@ -7,8 +7,9 @@ says otherwise, and [Schema 4](#schema-4) lists every difference.
 
 | | Schema 3 | Schema 4 |
 |---|---|---|
-| Path (Windows) | `%USERPROFILE%\.runelite\facette\state-v3.json` | `%USERPROFILE%\.runelite\facette\state-v4.json` |
-| Path (other platforms) | `~/.runelite/facette/state-v3.json` | `~/.runelite/facette/state-v4.json` |
+| Path (Windows) | `%USERPROFILE%\.runelite\plugin-data\facette-companion\state-v3.json` | `%USERPROFILE%\.runelite\plugin-data\facette-companion\state-v4.json` |
+| Path (other platforms) | `~/.runelite/plugin-data/facette-companion/state-v3.json` | `~/.runelite/plugin-data/facette-companion/state-v4.json` |
+| Written by | RuneLite's managed file API (`Plugin.getPluginDirectory()`, internal name `facette-companion`) | the same |
 | Encoding | UTF-8, one JSON object, no trailing newline | the same |
 | Maximum size | 24,576 bytes | the same |
 | Configurable | No. Neither path can be changed | the same |
@@ -486,11 +487,20 @@ with it and get a missing-file or sharing error. **Treat a failed open or a tran
 ## Schema history
 
 Schema 1 was used by earlier prototype builds and is superseded. Schema 2 is superseded by
-schema 3. Current versions write `state-v3.json` and `state-v4.json` in the legacy directory and
-the [schema 5](#schema-5) documents in the managed directory, and nothing else.
+schema 3. Current versions write `state-v3.json`, `state-v4.json` and the [schema 5](#schema-5)
+documents, all in the plugin's RuneLite-managed directory, and nothing else.
+
+Earlier versions wrote `state-v3.json` and `state-v4.json` to `.runelite/facette`. The plugin
+declares that directory as its `legacyDataDirectory`, so RuneLite moves it into the managed
+directory when the plugin first opens it to write, if the managed directory does not exist yet.
+The move takes everything in it, including an older `state-v1.json` or `state-v2.json`, so a
+reader watching `.runelite/facette` then finds its file gone rather than stale. When the managed
+directory already exists, the old directory is left as it was and no longer updated, so a reader
+still watching it sees its files go stale.
 
 **An earlier schema's file is left exactly as it was.** A `state-v1.json` or `state-v2.json`
-alongside the current file is not read, migrated, or deleted. It simply stops being updated, and a
+alongside the current file is not read, rewritten, or deleted (only moved with its directory, as
+above). It simply stops being updated, and a
 reader still watching it sees its `emittedAt` stop advancing — which is the staleness rule that
 reader already implements. Nothing it reads is rewritten into a shape it does not understand. A test
 pins this for both earlier versions.
@@ -530,7 +540,8 @@ Schema 5 is a separate document set in RuneLite's managed plugin directory. It e
 reasons schema 4 cannot serve: a logged-in character must be recognized even when the client has
 not provided every container, and some account observations (bank, Seed Vault, per-quest state,
 diary and Combat Achievement tiers) are too large or too slow-moving to rewrite on every heartbeat.
-Schemas 3 and 4 are unchanged: same directory, same bytes, same all-or-nothing `loggedIn` rule.
+Schemas 3 and 4 are unchanged: same bytes, same all-or-nothing `loggedIn` rule, written beside
+schema 5 in the same directory.
 
 | | `state-v5.json` | `account-v5.json` |
 |---|---|---|
@@ -541,10 +552,7 @@ Schemas 3 and 4 are unchanged: same directory, same bytes, same all-or-nothing `
 | Maximum size | 32,768 bytes | 262,144 bytes |
 | Configurable | No | No |
 
-The legacy directory is not moved. The plugin sets no `legacyDataDirectory`, so RuneLite never
-relocates `.runelite/facette`, and `state-v3.json` and `state-v4.json` keep being written there for
-readers that have not moved. Both directories are written by one plugin run with the same
-`instanceId` and `seq`.
+All four files are written by one plugin run with the same `instanceId` and `seq`.
 
 Five committed files are the canonical byte examples, and a test fails if the serializer and any of
 them disagree:
@@ -755,23 +763,21 @@ Each tier is `{"tier": string, "completed": bool}`, `true` exactly when the game
 Diaries and Combat Achievements are re-read every ten game ticks while the conditions for quest
 reads hold. A change is written within one refresh and one account write interval.
 
-### Reader selection between the two directories
+### Reader selection
 
-1. Read `state-v5.json` from the managed directory. When it is valid and fresh by the rule in
-   [Publication and freshness](#publication-and-freshness), it is the source, and nothing from the
-   legacy directory is combined with it.
-2. Otherwise read the legacy directory exactly as for schemas 4, 3 and 2.
-3. A stale file in either directory is never selected, so a previous run cannot be revived by the
-   other directory going quiet.
+1. Read `state-v5.json`. When it is valid and fresh by the rule in
+   [Publication and freshness](#publication-and-freshness), it is the source, and nothing from
+   `state-v4.json` or `state-v3.json` is combined with it.
+2. Otherwise read `state-v4.json` and `state-v3.json` exactly as for schemas 4 and 3.
+3. A stale file is never selected, so a previous run cannot be revived by another file going quiet.
 
-A reader that only knows schemas 3 and 4 keeps working unchanged against this build: it never opens
-the managed directory, and it sees the same documents it saw before, including `loggedIn: false`
-while a container is missing. A schema-5 reader against an older build finds no managed directory
-and falls back to the legacy files.
+A reader that only knows schemas 3 and 4 reads the same documents as before, including
+`loggedIn: false` while a container is missing, from the managed directory rather than
+`.runelite/facette`.
 
 ### Moving from schema 4 to schema 5
 
-1. Read `state-v5.json` from the managed directory first; fall back to the legacy files.
+1. Read `state-v5.json` first; fall back to `state-v4.json` and `state-v3.json` beside it.
 2. Recognize the character from `session.loggedIn` and present `readiness`; read each player group
    only through its `groups` entry.
 3. Treat `not_observed` as unknown, never as empty.

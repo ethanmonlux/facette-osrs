@@ -53,7 +53,7 @@ import java.util.Objects;
  * reader that has not moved to schema 4 never sees the new keys.
  *
  * Schema 5 is schema 4 plus a character-session identifier and three trailing keys, and is written
- * to the managed directory rather than beside the other two. It is serialized from a second snapshot
+ * beside the other two. It is serialized from a second snapshot
  * that carries partial player data: there, a recognized character is logged in whatever containers
  * the client has provided, and each group says for itself whether it is current. The schema-3 and
  * schema-4 documents are built from the gated snapshot exactly as before.
@@ -66,7 +66,7 @@ final class TelemetrySnapshot
 	static final int SCHEMA_4 = 4;
 
 	// Schema 4 plus the character session, readiness, per-group observations and the account
-	// revision. Written to the managed directory, never instead of the legacy files.
+	// revision. Written beside schemas 3 and 4, never instead of them.
 	static final int SCHEMA_5 = 5;
 
 	// The one account document a schema-5 snapshot can reference.

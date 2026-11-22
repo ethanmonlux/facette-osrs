@@ -82,7 +82,6 @@ public class FacetteTelemetryPluginAccountDocumentTest
 	private ScheduledExecutorService executor;
 	private Runnable scheduledTask;
 	private final List<Runnable> executorQueue = new ArrayList<>();
-	private Path legacyDirectory;
 	private Path managedDirectory;
 	private SnapshotStore managedStore;
 	// When set, every attempt to stage account-v5.json fails with an unchecked exception.
@@ -116,7 +115,6 @@ public class FacetteTelemetryPluginAccountDocumentTest
 			return null;
 		}).when(executor).execute(any(Runnable.class));
 
-		legacyDirectory = temporaryFolder.newFolder("facette").toPath();
 		managedDirectory = temporaryFolder.getRoot().toPath()
 			.resolve("plugin-data").resolve("facette-companion");
 		PathSnapshotStore directory = new PathSnapshotStore(managedDirectory);
@@ -178,7 +176,7 @@ public class FacetteTelemetryPluginAccountDocumentTest
 
 		AtomicInteger sessions = new AtomicInteger();
 		plugin = new FacetteTelemetryPlugin(() -> now, () -> elapsed, () -> "instance-1",
-			() -> legacyDirectory, () -> executor,
+			() -> executor,
 			() -> managedDirectoryAvailable ? managedStore : null,
 			() -> "session-" + sessions.incrementAndGet());
 		plugin.client = client;
@@ -478,7 +476,7 @@ public class FacetteTelemetryPluginAccountDocumentTest
 		assertTrue(v5.contains("\"loggedIn\":true"));
 		assertTrue("every heartbeat still publishes", v5.contains("\"seq\":3,"));
 		assertTrue(v5.endsWith("\"accountData\":null}"));
-		assertTrue(read(legacyDirectory.resolve("state-v3.json")).contains("\"seq\":3,"));
+		assertTrue(read(managedDirectory.resolve("state-v3.json")).contains("\"seq\":3,"));
 
 		accountStoreBroken = false;
 		elapsed += 3_000_000_000L;

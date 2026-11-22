@@ -24,9 +24,8 @@
  */
 package com.facette.telemetry;
 
-import java.io.File;
 import java.io.IOException;
-import java.nio.file.Path;
+import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -70,7 +69,6 @@ import net.runelite.api.gameval.InventoryID;
 import net.runelite.api.gameval.ItemID;
 import net.runelite.api.gameval.VarPlayerID;
 import net.runelite.api.gameval.VarbitID;
-import net.runelite.client.RuneLite;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.events.RuneScapeProfileChanged;
@@ -97,9 +95,12 @@ import net.runelite.client.plugins.PluginDescriptor;
 @PluginDescriptor(
 	name = "Facette Companion",
 	// The Plugin Hub name. RuneLite derives the managed directory, plugin-data/facette-companion, from
-	// it. No legacyDataDirectory is set on purpose: that would move .runelite/facette, which readers
-	// of schemas 3 and 4 still watch.
+	// it, and every file the plugin writes is in that directory.
 	internalName = "facette-companion",
+	// Earlier versions wrote state-v3.json and state-v4.json to .runelite/facette. RuneLite moves
+	// that directory into the managed one the first time it is opened, if the managed one does not
+	// exist yet.
+	legacyDataDirectory = "facette",
 	description = "Exports your live game state, bank and Seed Vault when you open them, quest "
 		+ "states, and diary and Combat Achievement tier completion to documented local JSON files. "
 		+ "Facette is an optional reader. Read-only; no network requests.",
@@ -110,8 +111,6 @@ public class FacetteTelemetryPlugin extends Plugin
 	private static final long PUBLISH_INTERVAL_MILLIS = 250L;
 
 	private static final long HEARTBEAT_INTERVAL_MILLIS = 1_500L;
-
-	private static final String DATA_SUBDIRECTORY = "facette";
 
 	// Matched positionally to the slot names schema 3 declares. RuneLite's enumeration also carries
 	// the player model's arms, hair, and jaw, which never hold an item.
@@ -202,9 +201,6 @@ public class FacetteTelemetryPlugin extends Plugin
 	};
 	private static final int COMBAT_ACHIEVEMENT_TIER_COMPLETED = 2;
 
-	// The constructor tests use when a run should write no schema-5 file at all.
-	private static final Supplier<SnapshotStore> NO_MANAGED_DIRECTORY = () -> null;
-
 	// Whether this build reads and writes the schema-5 account document (account-v5.json): the bank
 	// and Seed Vault when the game delivers them, per-quest state, and diary and Combat Achievement
 	// tier completion. On. One switch, so the whole account document can be turned off in one place.
@@ -224,12 +220,14 @@ public class FacetteTelemetryPlugin extends Plugin
 
 	private final Supplier<String> instanceIds;
 
-	private final Supplier<Path> dataDirectories;
-
 	private final Supplier<ScheduledExecutorService> executors;
 
-	// Schema 5's directory. Null means the plugin's own managed directory, resolved per run.
+	// The directory every file is written to. Null means the plugin's own managed directory,
+	// resolved per run through RuneLite's Filepath.
 	private final Supplier<SnapshotStore> managedStores;
+
+	// Whether state-v5.json is written. Always outside tests.
+	private final boolean schema5;
 
 	// Whether the account document is read and written. ACCOUNT_DOCUMENT outside tests.
 	private final boolean accountDocument;
@@ -251,44 +249,42 @@ public class FacetteTelemetryPlugin extends Plugin
 			System::currentTimeMillis,
 			System::nanoTime,
 			() -> UUID.randomUUID().toString(),
-			FacetteTelemetryPlugin::runeLiteDataDirectory,
 			FacetteTelemetryPlugin::newPublisherExecutor,
 			null,
 			() -> UUID.randomUUID().toString());
 	}
 
-	/** Writes schemas 3 and 4 only, as every build before schema 5 did. */
+	/** Writes schemas 3 and 4 only, into the given directory: the lifecycle tests' configuration. */
 	FacetteTelemetryPlugin(LongSupplier wallClockMillis, LongSupplier elapsedNanos,
-		Supplier<String> instanceIds, Supplier<Path> dataDirectories,
+		Supplier<String> instanceIds, Supplier<SnapshotStore> stores,
 		Supplier<ScheduledExecutorService> executors)
 	{
-		this(wallClockMillis, elapsedNanos, instanceIds, dataDirectories, executors,
-			NO_MANAGED_DIRECTORY, () -> UUID.randomUUID().toString());
+		this(wallClockMillis, elapsedNanos, instanceIds, executors,
+			Objects.requireNonNull(stores, "stores"), () -> UUID.randomUUID().toString(), false, false);
 	}
 
-	/** Schema 5 with the account document as this build ships it: switched on. */
+	/** Every file, with the account document as this build ships it: switched on. */
 	FacetteTelemetryPlugin(LongSupplier wallClockMillis, LongSupplier elapsedNanos,
-		Supplier<String> instanceIds, Supplier<Path> dataDirectories,
-		Supplier<ScheduledExecutorService> executors, Supplier<SnapshotStore> managedStores,
-		Supplier<String> characterSessionIds)
+		Supplier<String> instanceIds, Supplier<ScheduledExecutorService> executors,
+		Supplier<SnapshotStore> managedStores, Supplier<String> characterSessionIds)
 	{
-		this(wallClockMillis, elapsedNanos, instanceIds, dataDirectories, executors, managedStores,
-			characterSessionIds, ACCOUNT_DOCUMENT);
+		this(wallClockMillis, elapsedNanos, instanceIds, executors, managedStores,
+			characterSessionIds, true, ACCOUNT_DOCUMENT);
 	}
 
-	FacetteTelemetryPlugin(LongSupplier wallClockMillis, LongSupplier elapsedNanos,
-		Supplier<String> instanceIds, Supplier<Path> dataDirectories,
-		Supplier<ScheduledExecutorService> executors, Supplier<SnapshotStore> managedStores,
-		Supplier<String> characterSessionIds, boolean accountDocument)
+	private FacetteTelemetryPlugin(LongSupplier wallClockMillis, LongSupplier elapsedNanos,
+		Supplier<String> instanceIds, Supplier<ScheduledExecutorService> executors,
+		Supplier<SnapshotStore> managedStores, Supplier<String> characterSessionIds, boolean schema5,
+		boolean accountDocument)
 	{
 		this.wallClockMillis = Objects.requireNonNull(wallClockMillis, "wallClockMillis");
 		this.elapsedNanos = Objects.requireNonNull(elapsedNanos, "elapsedNanos");
 		this.instanceIds = Objects.requireNonNull(instanceIds, "instanceIds");
-		this.dataDirectories = Objects.requireNonNull(dataDirectories, "dataDirectories");
 		this.executors = Objects.requireNonNull(executors, "executors");
 		this.managedStores = managedStores;
 		this.characterSessionIds = Objects.requireNonNull(characterSessionIds, "characterSessionIds");
-		this.accountDocument = accountDocument;
+		this.schema5 = schema5;
+		this.accountDocument = schema5 && accountDocument;
 	}
 
 	@Override
@@ -296,19 +292,18 @@ public class FacetteTelemetryPlugin extends Plugin
 	{
 		// A fresh identity every start, derived from nothing: not the account, profile, machine, or
 		// any game state. It only lets a reader notice a restart.
-		Path dataDirectory = dataDirectories.get();
-		ManagedExport managedExport = managedStores == NO_MANAGED_DIRECTORY
-			? null
-			: new ManagedExport(managedStores != null ? managedStores : this::openManagedDirectory,
-				wallClockMillis, accountDocument);
+		ManagedExport managedExport = new ManagedExport(
+			managedStores != null ? managedStores : this::openManagedDirectory, wallClockMillis,
+			schema5, accountDocument);
+		SnapshotStore directory = managedExport.getStore();
 		PublisherRunContext run = PublisherRunContext.begin(
 			newestGeneration,
 			new TelemetryState(instanceIds.get(), wallClockMillis, elapsedNanos,
-				managedExport != null, QUEST_CATALOGUE.length, characterSessionIds),
-			new TelemetrySnapshotWriter(dataDirectory, TelemetrySnapshot.SCHEMA),
-			new TelemetrySnapshotWriter(dataDirectory, TelemetrySnapshot.SCHEMA_4),
+				schema5, QUEST_CATALOGUE.length, characterSessionIds),
+			new TelemetrySnapshotWriter(directory, TelemetrySnapshot.SCHEMA, wallClockMillis),
+			new TelemetrySnapshotWriter(directory, TelemetrySnapshot.SCHEMA_4, wallClockMillis),
 			managedExport);
-		if (managedExport != null && accountDocument)
+		if (accountDocument)
 		{
 			// The first account write of this run replaces whatever an earlier run left on disk.
 			run.getState().getAccount().replacePreviousDocument();
@@ -1203,6 +1198,12 @@ public class FacetteTelemetryPlugin extends Plugin
 
 	private void publish(PublisherRunContext run, boolean pluginActive)
 	{
+		ManagedExport export = run.getManagedExport();
+		if (export != null && !export.isAvailable())
+		{
+			// Already logged once, when the directory could not be opened. Nothing is written.
+			return;
+		}
 		TelemetryState publishingState = run.getState();
 		TelemetrySnapshot snapshot = publishingState.nextSnapshot(pluginActive);
 		try
@@ -1235,15 +1236,14 @@ public class FacetteTelemetryPlugin extends Plugin
 	}
 
 	/**
-	 * Schema 5, last and in the managed directory, under the same number. Like schema 4 it never
-	 * affects the legacy files: a failure here leaves them as they are and is retried by the next
-	 * publication.
+	 * Schema 5, last, under the same number. Like schema 4 it never affects the schema-3 file: a
+	 * failure here leaves it as it is and is retried by the next publication.
 	 */
 	private void publishSchema5(PublisherRunContext run, TelemetrySnapshot snapshot)
 	{
 		TelemetrySnapshot view = snapshot.getSchema5View();
 		ManagedExport export = run.getManagedExport();
-		if (view == null || export == null || !export.isAvailable())
+		if (view == null || export == null || !export.isAvailable() || export.getStateWriter() == null)
 		{
 			return;
 		}
@@ -1293,8 +1293,10 @@ public class FacetteTelemetryPlugin extends Plugin
 	}
 
 	/**
-	 * The plugin's own managed directory, from RuneLite. Called on the publisher thread on the run's
-	 * first publication. Null when RuneLite cannot provide it, which leaves schema 5 unwritten.
+	 * The plugin's own managed directory, from RuneLite. Called on the publisher thread, on the run's
+	 * first publication and again on a later one if it failed, which is also where RuneLite moves an
+	 * earlier version's .runelite/facette into it. A failure is reported to {@link ManagedExport},
+	 * which logs it once and leaves the run writing nothing until it succeeds.
 	 */
 	private SnapshotStore openManagedDirectory()
 	{
@@ -1302,16 +1304,10 @@ public class FacetteTelemetryPlugin extends Plugin
 		{
 			return new FilepathSnapshotStore(getPluginDirectory());
 		}
-		catch (IOException | RuntimeException e)
+		catch (IOException e)
 		{
-			log.warn("Facette Telemetry cannot open its managed directory; schema 5 is not written", e);
-			return null;
+			throw new UncheckedIOException(e);
 		}
-	}
-
-	private static Path runeLiteDataDirectory()
-	{
-		return new File(RuneLite.RUNELITE_DIR, DATA_SUBDIRECTORY).toPath();
 	}
 
 	// One thread per run, named for a thread dump and daemon so it cannot hold the client open.
