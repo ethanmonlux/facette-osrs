@@ -34,9 +34,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.LongSupplier;
 
 /**
- * The account observations schema 5 can write to {@code account-v5.json}: the bank, the Seed Vault,
- * per-quest state, diary tiers and Combat Achievement tiers. Switched off in this build, so nothing
- * is ever observed into it and it is never written. Holds no RuneLite types. Every
+ * The account observations schema 5 writes to {@code account-v5.json}: the bank, the Seed Vault,
+ * per-quest state, diary tiers and Combat Achievement tiers. Holds no RuneLite types. Every
  * observation belongs to one character session and is discarded with it; nothing here outlives a
  * logout or survives a plugin restart.
  *
@@ -216,6 +215,8 @@ final class TelemetryAccountState
 	private boolean clearingPending;
 	private long lastAttemptAtElapsedNanos;
 	private boolean attempted;
+	// The run has stopped: no session can begin again, so the final clearing document stays final.
+	private boolean closed;
 
 	private Container bank = new Container();
 	private Container seedVault = new Container();
@@ -257,7 +258,7 @@ final class TelemetryAccountState
 	synchronized void beginSession(String sessionId)
 	{
 		Objects.requireNonNull(sessionId, "sessionId");
-		if (sessionId.equals(characterSessionId))
+		if (closed || sessionId.equals(characterSessionId))
 		{
 			return;
 		}
@@ -293,10 +294,34 @@ final class TelemetryAccountState
 			clearingPending = true;
 			changed();
 		}
-		else
+		else if (!clearingPending)
 		{
+			// Nothing of this session reached the file, so nothing needs clearing. A replacement
+			// still pending from the run's start is kept: it has to land whatever happens.
 			dirty = false;
 		}
+	}
+
+	/**
+	 * Queues a document at once, before anything is observed, so this run's first write replaces an
+	 * account document an earlier run left behind: one RuneLite closed or killed while logged in, or
+	 * one whose final clearing write was superseded by a fast re-enable. Called once, as the run
+	 * starts.
+	 */
+	synchronized void replacePreviousDocument()
+	{
+		clearingPending = true;
+		changed();
+	}
+
+	/**
+	 * Ends the session for good as the run stops. Unlike {@link #endSession()}, a session cannot
+	 * begin again afterwards, so a game tick racing the shutdown cannot refill the final document.
+	 */
+	synchronized void close()
+	{
+		endSession();
+		closed = true;
 	}
 
 	private void changed()

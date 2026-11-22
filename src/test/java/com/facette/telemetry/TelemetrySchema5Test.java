@@ -40,9 +40,9 @@ import static org.junit.Assert.fail;
 import org.junit.Test;
 
 /**
- * Holds the committed schema-5 fixtures and the serializer to the same contract, measures the state
- * document's worst case against its bound, and pins that turning schema 5 on changes nothing in
- * schemas 3 and 4. This build writes no account document, so no fixture references one.
+ * Holds the committed schema-5 state fixtures and the serializer to the same contract, measures the
+ * state document's worst case against its bound, and pins that turning schema 5 on changes nothing
+ * in schemas 3 and 4. The account document's own fixtures are in {@link TelemetryAccountSchemaTest}.
  */
 public class TelemetrySchema5Test
 {
@@ -70,7 +70,7 @@ public class TelemetrySchema5Test
 		return TelemetrySnapshotTest.populatedFixtureBuilder()
 			.slayer(12, TelemetrySnapshot.SLAYER_BOSS_TASK_ID, 23, null)
 			.schema5(SESSION_ID, TelemetrySnapshot.READY, Collections.emptyList(),
-				allGroups(TelemetryGroupObservation.current(SAMPLE_AT)), null)
+				allGroups(TelemetryGroupObservation.current(SAMPLE_AT)), 3L)
 			.build();
 	}
 
@@ -248,11 +248,17 @@ public class TelemetrySchema5Test
 		assertEquals(path + " must end with the closing brace", '}', (char) bytes[bytes.length - 1]);
 	}
 
-	/** This build writes no account document, so no state fixture may reference one. */
+	/**
+	 * Only the ready fixture references an account document, and exactly revision 3, the committed
+	 * account fixture. A character whose worn items are missing has no account revision yet, and a
+	 * logged-out snapshot never references one.
+	 */
 	@Test
-	public void noStateFixtureReferencesAnAccountDocument() throws IOException
+	public void onlyTheReadyFixtureReferencesAnAccountDocument() throws IOException
 	{
-		for (String path : ALL_FIXTURES)
+		assertTrue(new String(readProjectFile(READY_FIXTURE), StandardCharsets.UTF_8)
+			.endsWith(",\"accountData\":{\"file\":\"account-v5.json\",\"revision\":3}}"));
+		for (String path : new String[]{PARTIAL_FIXTURE, LOGGED_OUT_FIXTURE})
 		{
 			String json = new String(readProjectFile(path), StandardCharsets.UTF_8);
 			assertTrue(path + " must carry no account reference", json.endsWith(",\"accountData\":null}"));

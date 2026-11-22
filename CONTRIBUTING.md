@@ -26,7 +26,7 @@ file adds.
 ## Architecture
 
 The plugin reads RuneLite client state on the client thread and writes one local JSON snapshot,
-as two schema-versioned files in one directory. A separately installed reader picks the file up on its own. Nothing flows back: the plugin
+as schema-versioned files in two directories, plus a separately bounded account document. A separately installed reader picks the files up on its own. Nothing flows back: the plugin
 performs no gameplay input, accepts no commands, and makes no network requests.
 
 Keep contributions inside that shape.
@@ -41,8 +41,8 @@ Open an issue before writing the code. A schema change needs:
 1. a version bump, since new fields, removed fields, renamed keys, changed types, changed
    nullability, and changed ordering are all schema changes;
 2. [SCHEMA.md](SCHEMA.md) updated in the same change;
-3. both fixtures under `src/test/resources/` regenerated, since tests hold the serializer and the
-   fixtures to the same bytes;
+3. the affected fixtures under `src/test/resources/` regenerated, since tests hold the serializer
+   and the fixtures to the same bytes;
 4. coordination with the consuming application, which reads those fixtures as its contract.
 
 ## Dependencies
@@ -74,5 +74,6 @@ Never include an account credential, password, authentication token, session fil
 account material in a report, an issue, a pull request, or a log. Nothing here needs one.
 
 Before attaching a snapshot, read it and decide whether you are comfortable sharing the gameplay
-state it contains. Schema 2 does not include account identity or credentials, but it does include
-the gameplay fields documented in [SCHEMA.md](SCHEMA.md).
+state it contains. No file includes account identity or credentials, but each includes the
+gameplay fields documented in [SCHEMA.md](SCHEMA.md), and `account-v5.json` includes your bank and
+Seed Vault contents when you have opened them, your quest states, and your diary and Combat Achievement tier completion.

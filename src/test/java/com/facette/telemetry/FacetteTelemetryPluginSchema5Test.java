@@ -58,7 +58,6 @@ import net.runelite.api.Player;
 import net.runelite.api.Skill;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.GameTick;
-import net.runelite.api.events.ItemContainerChanged;
 import net.runelite.api.gameval.InventoryID;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.events.RuneScapeProfileChanged;
@@ -67,8 +66,10 @@ import net.runelite.client.events.RuneScapeProfileChanged;
  * Drives the real plugin, configured as it ships, against a mocked client and a temporary managed
  * directory. The legacy-only lifecycle is covered by {@link FacetteTelemetryPluginLifecycleTest};
  * this covers what schema 5 adds: a logged-in character recognized without any gameplay input or
- * container, its character session across logout, world hop and profile change, and the account
- * document switched off, so nothing is read for it and no account file is written.
+ * container, and its character session across logout, world hop and profile change. None of it
+ * waits on the account document, which {@link FacetteTelemetryPluginAccountDocumentTest} covers:
+ * the character is live before any account value is read, and the account document observes
+ * nothing until the game delivers something to put in it.
  */
 public class FacetteTelemetryPluginSchema5Test
 {
@@ -193,12 +194,19 @@ public class FacetteTelemetryPluginSchema5Test
 		return read(legacyDirectory.resolve("state-v3.json"));
 	}
 
-	/** No account document on disk, and the state file references none. */
-	private void assertNoAccountDocument() throws IOException
+	/**
+	 * The account document holds no observation: every group is not observed. The run's first write
+	 * replaces whatever an earlier run left, so the file exists, but recognition never depends on it.
+	 */
+	private void assertAccountDocumentObservesNothing() throws IOException
 	{
-		assertFalse("no account document is written",
-			Files.exists(managedDirectory.resolve(ACCOUNT_FILE)));
-		assertTrue(stateV5().endsWith("\"accountData\":null}"));
+		String account = read(managedDirectory.resolve(ACCOUNT_FILE));
+		for (String group : new String[]{"bank", "seedVault", "questStates", "diaries",
+			"combatAchievements"})
+		{
+			assertTrue(group + " is not observed", account.contains(
+				"\"" + group + "\":{\"availability\":\"not_observed\",\"observedAt\":null,"));
+		}
 	}
 
 	/** The session's identifier: the last key of the session object, so it ends at its brace. */
@@ -251,7 +259,7 @@ public class FacetteTelemetryPluginSchema5Test
 		assertTrue(v3.contains("\"gameState\":\"LOGGED_IN\""));
 		assertTrue("the same publication, the same number",
 			v5.contains("\"seq\":0") && v3.contains("\"seq\":0"));
-		assertNoAccountDocument();
+		assertAccountDocumentObservesNothing();
 	}
 
 	/**
@@ -274,7 +282,7 @@ public class FacetteTelemetryPluginSchema5Test
 		assertTrue(v5.contains("\"usedSlots\":28,\"freeSlots\":0"));
 		assertTrue(v5.contains("\"equipment\":{\"availability\":\"current\""));
 		assertTrue(stateV3().contains("\"loggedIn\":true"));
-		assertNoAccountDocument();
+		assertAccountDocumentObservesNothing();
 	}
 
 	@Test
@@ -307,7 +315,7 @@ public class FacetteTelemetryPluginSchema5Test
 		String v5 = stateV5();
 		assertTrue(v5.contains("\"readiness\":{\"state\":\"logged_out\",\"missing\":[]}"));
 		assertTrue(v5.contains("\"characterSessionId\":null"));
-		assertNoAccountDocument();
+		assertAccountDocumentObservesNothing();
 
 		gameState(GameState.LOGGING_IN);
 		gameState(GameState.LOGGED_IN);
@@ -315,7 +323,7 @@ public class FacetteTelemetryPluginSchema5Test
 		publish();
 		assertTrue(stateV5().contains("\"loggedIn\":true"));
 		assertNotEquals("a new login is a new character session", first, sessionId(stateV5()));
-		assertNoAccountDocument();
+		assertAccountDocumentObservesNothing();
 	}
 
 	@Test
@@ -339,7 +347,7 @@ public class FacetteTelemetryPluginSchema5Test
 		assertTrue(v5.contains("\"loggedIn\":true"));
 		assertTrue(v5.contains("\"world\":303"));
 		assertEquals(session, sessionId(v5));
-		assertNoAccountDocument();
+		assertAccountDocumentObservesNothing();
 	}
 
 	@Test
@@ -354,7 +362,7 @@ public class FacetteTelemetryPluginSchema5Test
 		publish();
 		assertTrue(stateV5().contains("\"loggedIn\":true"));
 		assertNotEquals(first, sessionId(stateV5()));
-		assertNoAccountDocument();
+		assertAccountDocumentObservesNothing();
 	}
 
 	@Test
@@ -369,38 +377,27 @@ public class FacetteTelemetryPluginSchema5Test
 		assertEquals(first, sessionId(stateV5()));
 	}
 
-	// --- the account document is off ---------------------------------------------------------
+	// --- recognition never waits on the account document -------------------------------------
 
 	/**
-	 * A whole session as this build ships: idle ticks well past every point at which the account
-	 * document would read quests, diaries or Combat Achievement tiers, the bank and the Seed Vault
-	 * delivered by the game, a logout, and a disable. Nothing is read for the account document and
-	 * no account file is ever written.
+	 * The character is live on the first publication, before the account document has read
+	 * anything: no quest-status script, no diary or Combat Achievement variable, and no bank. Those
+	 * reads start on the second game tick of a session, in a bounded batch, and only after the
+	 * character is already published.
 	 */
 	@Test
-	public void theAccountDocumentIsOffSoNothingIsReadForItAndNoFileIsWritten() throws IOException
+	public void theCharacterIsLiveBeforeAnyAccountValueIsRead() throws IOException
 	{
-		ItemContainer bank = containerOf(new Item(995, 1_000));
-		ItemContainer seedVault = containerOf(new Item(5318, 3));
 		start();
 		publish();
-		assertNoAccountDocument();
-
-		for (int i = 0; i < 40; i++)
-		{
-			tick();
-		}
-		plugin.onItemContainerChanged(new ItemContainerChanged(InventoryID.BANK, bank));
-		plugin.onItemContainerChanged(new ItemContainerChanged(InventoryID.SEED_VAULT, seedVault));
-		elapsed += 3_000_000_000L;
+		assertTrue(stateV5().contains("\"loggedIn\":true"));
+		assertTrue(stateV3().contains("\"gameState\":\"LOGGED_IN\""));
+		assertAccountDocumentObservesNothing();
+		tick();
 		publish();
-		assertNoAccountDocument();
+		assertTrue(stateV5().contains("\"loggedIn\":true"));
 
-		assertEquals("no quest-status script is run", 0, clientCalls("runScript"));
-		assertEquals("no quest state is read", 0, clientCalls("getIntStack"));
-		assertTrue("the delivered bank is not read", mockingDetails(bank).getInvocations().isEmpty());
-		assertTrue("the delivered Seed Vault is not read",
-			mockingDetails(seedVault).getInvocations().isEmpty());
+		assertEquals("no quest-status script before the second tick", 0, clientCalls("runScript"));
 		List<Integer> accountVarbits = new ArrayList<>();
 		for (int[] region : FacetteTelemetryPlugin.DIARY_TIER_VARBITS)
 		{
@@ -413,24 +410,17 @@ public class FacetteTelemetryPluginSchema5Test
 		{
 			accountVarbits.add(varbit);
 		}
-		assertTrue("no diary or Combat Achievement tier is read",
+		assertTrue("no diary or Combat Achievement tier before the second tick",
 			mockingDetails(client).getInvocations().stream()
 				.filter(invocation -> invocation.getMethod().getName().equals("getVarbitValue"))
 				.noneMatch(invocation -> accountVarbits.contains(invocation.<Integer>getArgument(0))));
-
-		gameState(GameState.LOGIN_SCREEN);
-		publish();
-		assertNoAccountDocument();
-
-		plugin.shutDown();
-		new ArrayList<>(executorQueue).forEach(Runnable::run);
-		assertTrue(stateV5().contains("\"readiness\":{\"state\":\"inactive\",\"missing\":[]}"));
-		assertNoAccountDocument();
-		try (java.util.stream.Stream<Path> files = Files.list(managedDirectory))
-		{
-			assertTrue("the managed directory holds the state file only",
-				files.allMatch(path -> path.getFileName().toString().equals("state-v5.json")));
-		}
+		assertEquals("nothing asks for the bank or the Seed Vault", 0,
+			mockingDetails(client).getInvocations().stream()
+				.filter(invocation -> invocation.getMethod().getName().equals("getItemContainer"))
+				.map(invocation -> invocation.getArgument(0))
+				.filter(id -> Integer.valueOf(InventoryID.BANK).equals(id)
+					|| Integer.valueOf(InventoryID.SEED_VAULT).equals(id))
+				.count());
 	}
 
 	@Test
@@ -445,7 +435,7 @@ public class FacetteTelemetryPluginSchema5Test
 
 		assertTrue(stateV5().contains("\"readiness\":{\"state\":\"inactive\",\"missing\":[]}"));
 		assertTrue(stateV5().contains("\"characterSessionId\":null"));
-		assertNoAccountDocument();
+		assertAccountDocumentObservesNothing();
 	}
 
 	@Test

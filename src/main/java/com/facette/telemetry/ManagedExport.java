@@ -31,8 +31,8 @@ import java.util.function.Supplier;
 import lombok.extern.slf4j.Slf4j;
 
 /**
- * One run's schema-5 output in the plugin's managed directory: the fast {@code state-v5.json} and,
- * only when the account document is switched on, {@code account-v5.json}. The directory is resolved
+ * One run's schema-5 output in the plugin's managed directory: the fast {@code state-v5.json} and
+ * {@code account-v5.json}, the account document, when the run writes one. The directory is resolved
  * on the publisher thread on first use, so enabling the plugin never waits on the filesystem. A
  * directory that cannot be opened disables schema 5 for the run and leaves schemas 3 and 4
  * publishing exactly as before.
