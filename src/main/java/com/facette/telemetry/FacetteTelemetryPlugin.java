@@ -78,7 +78,7 @@ import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 
 /**
- * Exports a read-only view of the local player's live state to one local JSON file. Nothing flows
+ * Exports a read-only view of the local player's live state to documented local JSON files. Nothing flows
  * back: no command channel, no menu action, no synthesized input, and no network request. This class
  * is the only part that touches RuneLite. Client state is sampled on the client thread, where those
  * reads are legal, and publication runs on a separate thread per run. Schema 3 accepts only an NPC
@@ -86,12 +86,12 @@ import net.runelite.client.plugins.PluginDescriptor;
  *
  * Every per-tick read here is a plain accessor or a variable lookup. Nothing walks the widget tree,
  * opens an interface, or reads the chat, and the sampling cost of a tick does not grow with how much
- * the account has done.
+ * the account has done. The one exception to "plain accessor" is per-quest state, which RuneLite
+ * reads by running the game's own read-only quest-status script; those reads are bounded to a fixed
+ * batch per tick, round-robin, and only for schema 5.
  *
- * The schema-5 account document (bank, Seed Vault, per-quest state, diary and Combat Achievement
- * tiers) is switched off in this build. Its code below is unreachable: the plugin never reads any of
- * those, never runs the quest-status script, and never writes {@code account-v5.json}, so every
- * schema-5 state file carries {@code "accountData": null}.
+ * Schema 5 also records the bank and the Seed Vault when the game delivers them, which happens only
+ * when the player opens them. The plugin never opens either.
  */
 @Slf4j
 @PluginDescriptor(
@@ -100,7 +100,8 @@ import net.runelite.client.plugins.PluginDescriptor;
 	// it. No legacyDataDirectory is set on purpose: that would move .runelite/facette, which readers
 	// of schemas 3 and 4 still watch.
 	internalName = "facette-companion",
-	description = "Exports your live game state to one documented local JSON file. "
+	description = "Exports your live game state, bank and Seed Vault when you open them, and quest, "
+		+ "diary and Combat Achievement progress to documented local JSON files. "
 		+ "Facette is an optional reader. Read-only; no network requests.",
 	tags = {"facette", "companion", "second screen", "local file", "telemetry"}
 )
@@ -204,9 +205,10 @@ public class FacetteTelemetryPlugin extends Plugin
 	// The constructor tests use when a run should write no schema-5 file at all.
 	private static final Supplier<SnapshotStore> NO_MANAGED_DIRECTORY = () -> null;
 
-	// Whether this build reads and writes the schema-5 account document. Off: the plugin reads no
-	// bank, Seed Vault, per-quest, diary or Combat Achievement value and writes no account-v5.json.
-	private static final boolean ACCOUNT_DOCUMENT = false;
+	// Whether this build reads and writes the schema-5 account document (account-v5.json): the bank
+	// and Seed Vault when the game delivers them, per-quest state, and diary and Combat Achievement
+	// tier completion. On. One switch, so the whole account document can be turned off in one place.
+	private static final boolean ACCOUNT_DOCUMENT = true;
 
 	@Inject
 	Client client;
@@ -264,7 +266,7 @@ public class FacetteTelemetryPlugin extends Plugin
 			NO_MANAGED_DIRECTORY, () -> UUID.randomUUID().toString());
 	}
 
-	/** Schema 5 with the account document as this build ships it: switched off. */
+	/** Schema 5 with the account document as this build ships it: switched on. */
 	FacetteTelemetryPlugin(LongSupplier wallClockMillis, LongSupplier elapsedNanos,
 		Supplier<String> instanceIds, Supplier<Path> dataDirectories,
 		Supplier<ScheduledExecutorService> executors, Supplier<SnapshotStore> managedStores,
@@ -306,6 +308,11 @@ public class FacetteTelemetryPlugin extends Plugin
 			new TelemetrySnapshotWriter(dataDirectory, TelemetrySnapshot.SCHEMA),
 			new TelemetrySnapshotWriter(dataDirectory, TelemetrySnapshot.SCHEMA_4),
 			managedExport);
+		if (managedExport != null && accountDocument)
+		{
+			// The first account write of this run replaces whatever an earlier run left on disk.
+			run.getState().getAccount().replacePreviousDocument();
+		}
 		currentRun = run;
 
 		clientThread.invoke(() -> initializeOnClientThread(run));
@@ -1109,10 +1116,18 @@ public class FacetteTelemetryPlugin extends Plugin
 		{
 			return;
 		}
+		// The account document first, so the snapshot that follows can reference it. It is optional,
+		// so its own failure is contained here and never costs the snapshot its publication.
 		try
 		{
-			// The account document first, so the snapshot that follows can reference it.
 			publishAccountIfDue(run);
+		}
+		catch (RuntimeException e)
+		{
+			log.warn("Account document publication failed; the snapshot is still published", e);
+		}
+		try
+		{
 			if (run.getState().isPublicationDue(HEARTBEAT_INTERVAL_MILLIS))
 			{
 				publish(run, true);
@@ -1165,7 +1180,7 @@ public class FacetteTelemetryPlugin extends Plugin
 	}
 
 	/**
-	 * The final write as the plugin stops: the account document, when this build writes one, is
+	 * The final write as the plugin stops: the account document, when this run writes one, is
 	 * cleared first, so a stopped plugin leaves no character's bank behind looking current, then the
 	 * inactive snapshot.
 	 */
@@ -1173,8 +1188,15 @@ public class FacetteTelemetryPlugin extends Plugin
 	{
 		if (run.getManagedExport() != null && accountDocument)
 		{
-			run.getState().getAccount().endSession();
-			publishAccountIfDue(run);
+			run.getState().getAccount().close();
+			try
+			{
+				publishAccountIfDue(run);
+			}
+			catch (RuntimeException e)
+			{
+				log.warn("Account document clearing failed; the inactive snapshot is still published", e);
+			}
 		}
 		publish(run, false);
 	}

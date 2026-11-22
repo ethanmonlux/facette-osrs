@@ -1,10 +1,10 @@
 # Facette Companion
 
-A read-only RuneLite plugin that exports a bounded view of your live game state to one documented
-local JSON file. [Facette](https://facette.gg) can read that file as an optional separately
+A read-only RuneLite plugin that exports a bounded view of your live game state to documented local
+JSON files. [Facette](https://facette.gg) can read those files as an optional separately
 distributed companion.
 
-While enabled, the plugin keeps one small JSON file up to date with a bounded view of your own
+While enabled, the plugin keeps a small set of JSON files up to date with a bounded view of your own
 character. Any local tool on the same machine can read it. Facette is a Windows-first second-screen
 companion for games, and this plugin is the Old School RuneScape side of it.
 
@@ -34,7 +34,9 @@ and it behaves the same whether Facette is installed, running, or absent.
 schema-versioned files: schemas 3 and 4 side by side in `.runelite/facette`, and schema 5 in the
 plugin's own RuneLite-managed directory. It performs no clicks, no keystrokes, no menu actions, no
 automation, and no window manipulation, never opens an interface, and accepts no commands from
-Facette or from the files it writes.
+Facette or from the files it writes. Per-quest state is read through RuneLite's own `Quest`
+API, which runs the game's read-only quest-status script; those reads are limited to a small batch
+per game tick.
 
 **No network communication.** Your game state does not leave your computer because of this
 plugin. The plugin contains no network client or server code and makes no network requests.
@@ -68,17 +70,33 @@ Everything schema 4 exports, written so that a logged-in character is recognized
 client has provided its worn-items or backpack container: each group says whether it is current, a
 retained earlier reading, not yet observed, or unavailable, together with when it was observed.
 A random character-session identifier, made fresh at each login and never derived from your
-account, ties the readings together. It is discarded when you log out, change to a different
-RuneScape profile, or disable the plugin.
+account, ties the readings together.
+
+Schema 5 also writes a separate account document, updated only when something in it changes:
+
+- your **bank** and **Seed Vault** item ids and quantities (with placeholders and bank fillers
+  labelled), recorded only when the game sends them because you opened the bank or the Seed Vault
+  yourself. Until you do, they are reported as not observed, which says nothing about what they
+  hold. They are not a list of everything you own;
+- the state of each quest in RuneLite's quest list (not started, in progress, finished, or
+  unavailable when it could not be read);
+- whether each tier of the twelve Achievement Diary regions is complete, and whether each of the
+  six Combat Achievement tiers is complete. No individual diary or Combat Achievement task, and no
+  Combat Achievement points total, is exported.
+
+All of it belongs to the current login only. It is cleared when you log out, change to a different
+RuneScape profile, or disable the plugin, and nothing is carried into the next login. If RuneLite
+closes or crashes while you are logged in, the last account document stays on disk until the
+plugin next starts and can write its folder, when its first write replaces it with an empty one. To remove it sooner,
+delete the file (see below).
 
 ### Not exported
 
 Account name or hash, RuneLite profile keys, credentials, chat, friends, clan data, other players,
-any player target, your bank, your Seed Vault or any other storage, per-quest state, Achievement
-Diary and Combat Achievement progress, collection log, item prices or valuations, aggregate wealth,
-Grand Exchange trade history, and location. The plugin does not read your bank, Seed Vault,
-per-quest state, Achievement Diary or Combat Achievement data at all; of your quests it reads only
-the quest point total listed above.
+any player target, collection log, individual diary or Combat Achievement tasks, item prices or
+valuations, aggregate wealth, Grand Exchange trade history, other storage, and location. Bank,
+Seed Vault and per-quest state appear only in schema 5's account document, and only as described
+above.
 
 The schema 3, 4 and 5 field lists are closed and documented in **[SCHEMA.md](SCHEMA.md)**,
 with committed byte-exact examples: for schema 3,
@@ -87,8 +105,9 @@ with committed byte-exact examples: for schema 3,
 [a populated snapshot](src/test/resources/facette-osrs-state-v4.json) and
 [a logged-out snapshot](src/test/resources/facette-osrs-state-v4-logged-out.json); for schema 5,
 [a ready snapshot](src/test/resources/facette-osrs-state-v5.json),
-[a snapshot of a character whose worn items the client has not provided](src/test/resources/facette-osrs-state-v5-partial.json)
-and [a logged-out snapshot](src/test/resources/facette-osrs-state-v5-logged-out.json).
+[a snapshot of a character whose worn items the client has not provided](src/test/resources/facette-osrs-state-v5-partial.json),
+[a logged-out snapshot](src/test/resources/facette-osrs-state-v5-logged-out.json) and
+[an account document](src/test/resources/facette-osrs-account-v5.json).
 
 ## Where the files are written
 
@@ -103,12 +122,13 @@ and, through RuneLite's managed file API,
 
 ```text
 %USERPROFILE%\.runelite\plugin-data\facette-companion\state-v5.json
+%USERPROFILE%\.runelite\plugin-data\facette-companion\account-v5.json
 ```
 
 On other platforms they are the same locations relative to RuneLite's own data directory, under
 `~/.runelite/facette/` and `~/.runelite/plugin-data/facette-companion/`.
 
-Those are the only three paths the plugin writes to. It creates the two directories if they are
+Those are the only four paths the plugin writes to. It creates the two directories if they are
 missing, does not move or migrate either, writes nothing inside your Old School RuneScape
 installation, does not scan your filesystem, and has no configurable output path.
 
@@ -138,7 +158,7 @@ To remove the exported data, delete the two directories:
 %USERPROFILE%\.runelite\plugin-data\facette-companion
 ```
 
-Deleting them removes the exported files and nothing else. The plugin keeps no history, database, log
+Deleting them removes the exported files, including the account document, and nothing else. The plugin keeps no history, database, log
 of your play, or copy of the data anywhere else. If the plugin is still enabled, it recreates the
 directory and the file on its next publication.
 
@@ -156,8 +176,9 @@ Gradle install is needed.
 ./gradlew run           # launch a RuneLite development client with the plugin loaded
 ```
 
-Then enable **Facette Companion** in the client's plugin list and confirm that `state-v3.json`
-and `state-v4.json` appear at the path above.
+Then enable **Facette Companion** in the client's plugin list and confirm that `state-v3.json`,
+`state-v4.json` and `state-v5.json` appear at the paths above. `account-v5.json` appears as the
+plugin starts, with nothing observed, and fills in a few seconds after you log in.
 
 If your account requires Jagex Account authorization for the development client, that is yours to
 handle privately in your own environment. **Never paste an account credential, token, or session
@@ -169,8 +190,9 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the boundaries a change has to stay i
 ## Reporting a problem
 
 Open an issue. Before attaching a snapshot, read it and decide whether you are comfortable sharing
-the gameplay state it contains. Schema 2 does not include account identity or credentials, but it
-does include the fields documented in [SCHEMA.md](SCHEMA.md).
+the gameplay state it contains. No file includes account identity or credentials, but each includes
+the fields documented in [SCHEMA.md](SCHEMA.md), and `account-v5.json` includes your bank and Seed
+Vault contents when you have opened them, and your quest, diary and Combat Achievement progress.
 
 ## License and affiliation
 

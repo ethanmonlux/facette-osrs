@@ -142,7 +142,7 @@ public class ManagedFileWriterTest
 		Files.createDirectories(directory);
 		Path abandoned = directory.resolve("state-v5-123.tmp");
 		Path recent = directory.resolve("state-v5-456.tmp");
-		Path otherWriters = directory.resolve("other-v5-789.tmp");
+		Path otherWriters = directory.resolve("account-v5-789.tmp");
 		for (Path path : new Path[]{abandoned, recent, otherWriters})
 		{
 			Files.write(path, new byte[]{1});

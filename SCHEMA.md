@@ -298,11 +298,11 @@ could say which account this is passes through here or anywhere else in the docu
 |---|---|---|
 | `quests.points` | integer or null | Your quest point total. |
 
-**Per-quest state is deliberately not exported.** Reading it means running one client script per
-quest, over two hundred of them, on every sample — a cost that grows with the game rather than with
-what the player is doing, and a shape a reviewer would rightly question in a plugin that otherwise
-only reads accessors and variables. The quest point total answers the bounded version of the same
-question for one variable read.
+**Per-quest state is not part of this document.** Reading it means running one client script per
+quest, over two hundred of them — a cost that grows with the game rather than with what the player
+is doing — so schemas 3 and 4 carry only the quest point total, one variable read, on every sample.
+Schema 5 exports per-quest state separately, in [`account-v5.json`](#account-v5json), read in a
+bounded batch per tick and rewritten only when a value changes.
 
 ## `slayer`
 
@@ -487,7 +487,7 @@ with it and get a missing-file or sharing error. **Treat a failed open or a tran
 
 Schema 1 was used by earlier prototype builds and is superseded. Schema 2 is superseded by
 schema 3. Current versions write `state-v3.json` and `state-v4.json` in the legacy directory and
-the [schema 5](#schema-5) `state-v5.json` in the managed directory, and nothing else.
+the [schema 5](#schema-5) documents in the managed directory, and nothing else.
 
 **An earlier schema's file is left exactly as it was.** A `state-v1.json` or `state-v2.json`
 alongside the current file is not read, migrated, or deleted. It simply stops being updated, and a
@@ -526,34 +526,34 @@ reader, the move is:
 
 ## Schema 5
 
-Schema 5 is a separate document in RuneLite's managed plugin directory. It exists for a reason
-schema 4 cannot serve: a logged-in character must be recognized even when the client has not
-provided every container. Schemas 3 and 4 are unchanged: same directory, same bytes, same
-all-or-nothing `loggedIn` rule.
+Schema 5 is a separate document set in RuneLite's managed plugin directory. It exists for two
+reasons schema 4 cannot serve: a logged-in character must be recognized even when the client has
+not provided every container, and some account observations (bank, Seed Vault, per-quest state,
+diary and Combat Achievement tiers) are too large or too slow-moving to rewrite on every heartbeat.
+Schemas 3 and 4 are unchanged: same directory, same bytes, same all-or-nothing `loggedIn` rule.
 
-| | `state-v5.json` |
-|---|---|
-| Path (Windows) | `%USERPROFILE%\.runelite\plugin-data\facette-companion\state-v5.json` |
-| Path (other platforms) | `~/.runelite/plugin-data/facette-companion/state-v5.json` |
-| Written by | RuneLite's managed file API (`Plugin.getPluginDirectory()`, internal name `facette-companion`) |
-| Cadence | every change, at most four times a second, and a heartbeat at least every two seconds |
-| Maximum size | 32,768 bytes |
-| Configurable | No |
-
-This build writes no other file in that directory. It reads no bank, Seed Vault, per-quest,
-Achievement Diary or Combat Achievement value.
+| | `state-v5.json` | `account-v5.json` |
+|---|---|---|
+| Path (Windows) | `%USERPROFILE%\.runelite\plugin-data\facette-companion\state-v5.json` | `%USERPROFILE%\.runelite\plugin-data\facette-companion\account-v5.json` |
+| Path (other platforms) | `~/.runelite/plugin-data/facette-companion/state-v5.json` | `~/.runelite/plugin-data/facette-companion/account-v5.json` |
+| Written by | RuneLite's managed file API (`Plugin.getPluginDirectory()`, internal name `facette-companion`) | the same |
+| Cadence | every change, at most four times a second, and a heartbeat at least every two seconds | only when an exported account observation changes, at most once every two seconds, plus one write as the plugin starts and one clearing write at a session end |
+| Maximum size | 32,768 bytes | 262,144 bytes |
+| Configurable | No | No |
 
 The legacy directory is not moved. The plugin sets no `legacyDataDirectory`, so RuneLite never
 relocates `.runelite/facette`, and `state-v3.json` and `state-v4.json` keep being written there for
 readers that have not moved. Both directories are written by one plugin run with the same
 `instanceId` and `seq`.
 
-Three committed files are the canonical byte examples, and a test fails if the serializer and any
-of them disagree:
+Five committed files are the canonical byte examples, and a test fails if the serializer and any of
+them disagree:
 
-- [`src/test/resources/facette-osrs-state-v5.json`](src/test/resources/facette-osrs-state-v5.json), a ready snapshot
+- [`src/test/resources/facette-osrs-state-v5.json`](src/test/resources/facette-osrs-state-v5.json), a ready snapshot referencing account revision 3
 - [`src/test/resources/facette-osrs-state-v5-partial.json`](src/test/resources/facette-osrs-state-v5-partial.json), a logged-in character whose worn-items container the client has not provided (full inventory, nothing worn)
 - [`src/test/resources/facette-osrs-state-v5-logged-out.json`](src/test/resources/facette-osrs-state-v5-logged-out.json), no player data
+- [`src/test/resources/facette-osrs-account-v5.json`](src/test/resources/facette-osrs-account-v5.json), account revision 3 for the ready snapshot's character session
+- [`src/test/resources/facette-osrs-account-v5-cleared.json`](src/test/resources/facette-osrs-account-v5-cleared.json), the clearing write at a session end
 
 ### `state-v5.json`
 
@@ -565,7 +565,7 @@ three keys appended after `grandExchange`. Key order is fixed. No other key appe
 | `session.characterSessionId` | string (36 chars) or null | A random UUID minted when this plugin run first samples a logged-in character, and discarded at the next session boundary: logout, a new login, or a RuneScape profile change (for example moving between a standard and a seasonal world). A world hop or loading screen keeps it. Never derived from the account, its name, its hash, or RuneLite's profile key; two sessions of the same character get unrelated values. `null` whenever `pluginActive` is `false` or no session has been sampled. |
 | `readiness` | object | What a reader may conclude about the character right now. See [`readiness`](#readiness). |
 | `groups` | object | Per-group availability and original observation time for the groups this document carries. See [`groups`](#groups). |
-| `accountData` | null | Always `null`. This build writes no account document, so there is nothing to reference. |
+| `accountData` | object or null | `{"file":"account-v5.json","revision":N}`: the exact account revision that belongs to this snapshot. `null` when none has been committed for this character session. |
 
 **`session.loggedIn` changes meaning in schema 5, and only here.** In schemas 3 and 4 it says that
 every required player value was read. In schema 5 it says the client is at `LOGGED_IN` and this run
@@ -576,7 +576,7 @@ whatever containers the client has or has not provided.
 
 **Whenever `loggedIn` is `false`, every player-derived value is `null`** exactly as in schema 4,
 every `capabilities` entry is `unavailable`, every `groups` entry is `unavailable` with
-`observedAt: null`, and `readiness.missing` is empty.
+`observedAt: null`, `readiness.missing` is empty, and `accountData` is `null`.
 
 **Whenever `loggedIn` is `true`**, `characterSessionId` and `trackingStartedAt` are non-null and
 `world` is non-null. Every other player value follows its group:
@@ -638,6 +638,123 @@ Always present, always carrying exactly one entry per group in this order: `vita
 `observedAt` is never later than `emittedAt` and never moves forward without a new read. A reader
 must treat an unrecognized availability value as not current.
 
+### `account-v5.json`
+
+```
+{"schema":5,"source":"runelite","kind":"account","instanceId":…,"characterSessionId":…,"revision":N,"writtenAt":…,
+ "bank":{…},"seedVault":{…},"questStates":{…},"diaries":{…},"combatAchievements":{…}}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `schema`, `source` | | `5`, `"runelite"`. |
+| `kind` | string | Always `"account"`. |
+| `instanceId` | string | The plugin run that wrote it; equal to the `state-v5.json` it belongs to. |
+| `characterSessionId` | string or null | The character session these observations belong to. `null` only in the clearing write. |
+| `revision` | integer | Increases by one for every account document this run commits, starting at `1`. Never reused within an `instanceId`. |
+| `writtenAt` | integer | Unix time in milliseconds when this revision was built. Not an observation time. |
+
+**Association is exact.** A reader uses an account document only when `state-v5.json` is the
+selected source, its `accountData.revision` equals this document's `revision`, and both carry the
+same `instanceId` and the same non-null `characterSessionId`. Anything else (an older revision, a
+newer one the state file does not reference yet, a different run, a different or ended session) is
+not used. The account file is always committed before the state file that references it, so a
+state file never references a revision that is not on disk yet. A reader that loses a race (reads
+the state file, then a newer account revision) finds no exact pairing and uses no account
+document until the next state publication, normally within a quarter of a second.
+
+At a session boundary (logout, a RuneScape profile change, or disabling the plugin) the plugin
+commits one clearing revision with `characterSessionId: null` and every group `not_observed`, so a
+previous character's bank does not remain on disk as if current. Nothing in this file survives into
+the next character session.
+
+If RuneLite closes, crashes or is killed while a character is logged in, no clearing write
+happens and the last revision stays on disk. Its `instanceId` belongs to a run that has ended, so
+no state file of a later run references it. When the plugin next starts and can write its managed
+directory, its first account write replaces the file, on its first publication (retried until it
+succeeds), with a revision of the new run in which every group
+is `not_observed`.
+
+**These groups are optional.** None of them is part of `readiness`, and none can make
+`loggedIn` false.
+
+#### `bank` and `seedVault`
+
+| Field | Type | Meaning |
+|---|---|---|
+| `availability` | string | `observed`, `not_observed`, or `unavailable`. |
+| `observedAt` | integer or null | When the game last delivered this container's contents in this character session. |
+| `items` | array or null | Container order, empty positions omitted. At most 1,600 entries for `bank` and 1,000 for `seedVault`. |
+
+Each item is `{"itemId": int, "quantity": int, "kind": "item" | "placeholder" | "filler"}`.
+`kind` is `filler` for the bank filler item (id `20594`), `placeholder` when the item's own
+composition is a placeholder variant (`ItemComposition.getPlaceholderTemplateId() != -1`; its
+`quantity` is the client's, normally `0`), and `item` otherwise. `itemId` is always the raw id the
+container holds; a placeholder's id is the placeholder variant's id, not the real item's.
+
+The plugin never opens either interface. It records the container when the game delivers it, which
+happens when the player opens the bank or the Seed Vault themselves, and when its contents change
+while open. **Until that happens in this character session the group is `not_observed`**, which
+says nothing about what the bank holds. A delivered container with no items is a confirmed empty
+container: `items: []`. Closing the interface keeps the last observation and its original
+`observedAt`; reopening it records a new one. A container over its bound becomes `unavailable` with
+`items: null`, never truncated.
+
+Neither group is a statement of everything the account owns: other storage, the Grand Exchange,
+group storage and items held elsewhere are not included.
+
+#### `questStates`
+
+| Field | Type | Meaning |
+|---|---|---|
+| `availability` | string | `current`, `partial`, or `not_observed`. |
+| `observedAt` | integer or null | The latest read that changed an entry or completed the first pass. Every read since found the same values. |
+| `catalogueSize` | integer | The number of quests in the RuneLite `Quest` enumeration this build was compiled against. |
+| `entries` | array or null | One entry per quest read so far, in catalogue order. At most 400. |
+
+Each entry is `{"questId": int, "name": string (64 chars), "state": "not_started" | "in_progress" | "finished" | "unavailable"}`.
+`questId` and `name` are RuneLite's `Quest.getId()` and `Quest.getName()`. `state` is RuneLite's
+`Quest.getState(client)`, which runs the game's own read-only quest-status script; `unavailable`
+means RuneLite's read threw or returned no state for that quest, and is never reported as
+`not_started`. A value RuneLite does return is reported as RuneLite maps it.
+
+Reads are bounded: at most 24 quests are read on a game tick, round-robin, so a complete pass of the
+catalogue takes about ten ticks and never runs on the publication thread. Until the first complete
+pass of a character session finishes, the group is `partial` and lists only the quests read so far.
+Reading starts on the second game tick of a session and only while the skill group is current,
+which is the signal that the login variable sync has arrived.
+
+#### `diaries`
+
+| Field | Type | Meaning |
+|---|---|---|
+| `availability` | string | `current` or `not_observed`. |
+| `observedAt` | integer or null | When the current values were first read. |
+| `regions` | array or null | Exactly twelve entries in this order: `ardougne`, `desert`, `falador`, `fremennik`, `kandarin`, `karamja`, `kourend`, `lumbridge`, `morytania`, `varrock`, `western`, `wilderness`. |
+
+Each region is `{"region": string, "easy": bool, "medium": bool, "hard": bool, "elite": bool}`.
+Each boolean is the game's own tier-completion variable, as named by RuneLite's `Varbits.DIARY_*`
+constants (`*_DIARY_<TIER>_COMPLETE` in the game-value tables). For Karamja easy, medium and hard
+(`ATJUN_<TIER>_DONE`) the variable reads `1` while a tier is only started and `2` once complete, so
+only `2` is `true`; every other variable is `1` for complete. **This is tier completion only.** It
+is not a claim that a reward was claimed, and no individual task is exported or implied.
+
+#### `combatAchievements`
+
+| Field | Type | Meaning |
+|---|---|---|
+| `availability` | string | `current` or `not_observed`. |
+| `observedAt` | integer or null | When the current values were first read. |
+| `tiers` | array or null | Exactly six entries: `easy`, `medium`, `hard`, `elite`, `master`, `grandmaster`. |
+| `points` | null | Always `null` in this revision. The current RuneLite API documents no Combat Achievement points variable, so points are not exported rather than derived. |
+
+Each tier is `{"tier": string, "completed": bool}`, `true` exactly when the game's
+`CA_TIER_STATUS_<TIER>` variable reads `2`, which RuneLite documents as completed. Any other value is
+`false`. No individual task is exported.
+
+Diaries and Combat Achievements are re-read every ten game ticks while the conditions for quest
+reads hold. A change is written within one refresh and one account write interval.
+
 ### Reader selection between the two directories
 
 1. Read `state-v5.json` from the managed directory. When it is valid and fresh by the rule in
@@ -658,4 +775,5 @@ and falls back to the legacy files.
 2. Recognize the character from `session.loggedIn` and present `readiness`; read each player group
    only through its `groups` entry.
 3. Treat `not_observed` as unknown, never as empty.
-4. Expect `accountData` to be `null`. This build writes no account document.
+4. Read `account-v5.json` only through an exact `accountData` match, and treat every account group
+   as optional and independently dated.
